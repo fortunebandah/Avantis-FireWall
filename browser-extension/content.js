@@ -34,6 +34,33 @@
     return "";
   }
 
+  function recordBlocked(domain, categories, reason) {
+    chrome.storage.local.get({ retentionHours: 24, events: [] }, (stored) => {
+      const cutoff = Date.now() - Number(stored.retentionHours || 24) * 60 * 60 * 1000;
+      const events = (Array.isArray(stored.events) ? stored.events : [])
+        .filter((event) => event && Date.parse(event.timestamp) >= cutoff)
+        .slice(-499);
+      events.push({
+        timestamp: new Date().toISOString(),
+        type: "blocked_visit",
+        domain: domain || location.hostname,
+        categories,
+        reason,
+      });
+      chrome.storage.local.set({ events });
+    });
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>'"]/g, (character) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "'": "&#39;",
+      '"': "&quot;",
+    }[character]));
+  }
+
   function showBlocked(title, detail, categories) {
     document.documentElement.innerHTML = `
       <head><title>Avantis FireWall</title><style>
@@ -49,24 +76,52 @@
         .reason { background: #f0f8fa; border-left: 4px solid #087f92; padding: 14px 16px; margin-bottom: 20px; }
         .tag { display: inline-block; background: #d9f1f3; color: #075d70; padding: 6px 10px; border-radius: 999px; margin: 3px 5px 3px 0; font-size: 13px; }
       </style></head>
-      <body><main><header><div class="brand">AVANTIS FIREWALL</div><h1>${title}</h1></header>
+      <body><main><header><div class="brand">AVANTIS FIREWALL</div><h1>${escapeHtml(title)}</h1></header>
       <section><p>${detail}</p><div class="reason">This request matched your configured protection rules.</div>
-      <div>${categories.map((category) => `<span class="tag">${category}</span>`).join("")}</div></section></main></body>`;
+      <div>${categories.map((category) => `<span class="tag">${escapeHtml(category)}</span>`).join("")}</div></section></main></body>`;
+  }
+
+  let lastCheckedUrl = "";
+
+  function checkPage(rules) {
+    if (lastCheckedUrl === location.href) return;
+    lastCheckedUrl = location.href;
+    const searchText = getSearchText();
+    const categories = matchingCategories(searchText, rules.categories);
+    if (categories.length) {
+      recordBlocked(location.hostname, categories, `Search term: ${searchText}`);
+      showBlocked("Search blocked", `This search contains a protected term: <strong>${escapeHtml(searchText)}</strong>.`, categories);
+      return;
+    }
+
+    if (isBlockedHost(location.hostname, rules.blocked_domains)) {
+      const hostCategories = matchingCategories(location.hostname, rules.categories);
+      recordBlocked(location.hostname, hostCategories, "Blocked domain");
+      showBlocked("Site blocked", `Access to <strong>${escapeHtml(location.hostname)}</strong> is blocked by Avantis FireWall.`, hostCategories);
+    }
+  }
+
+  function watchNavigation(rules) {
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    const notify = () => window.setTimeout(() => checkPage(rules), 0);
+    history.pushState = function (...args) {
+      originalPushState.apply(this, args);
+      notify();
+    };
+    history.replaceState = function (...args) {
+      originalReplaceState.apply(this, args);
+      notify();
+    };
+    window.addEventListener("popstate", notify);
+    window.addEventListener("hashchange", notify);
   }
 
   fetch(extensionRulesUrl)
     .then((response) => response.json())
     .then((rules) => {
-      const categories = matchingCategories(getSearchText(), rules.categories);
-      if (categories.length) {
-        showBlocked("Search blocked", `This search contains a protected term: <strong>${getSearchText()}</strong>.`, categories);
-        return;
-      }
-
-      if (isBlockedHost(location.hostname, rules.blocked_domains)) {
-        const hostCategories = matchingCategories(location.hostname, rules.categories);
-        showBlocked("Site blocked", `Access to <strong>${location.hostname}</strong> is blocked by Avantis FireWall.`, hostCategories);
-      }
+      checkPage(rules);
+      watchNavigation(rules);
     })
     .catch(() => {});
 })();

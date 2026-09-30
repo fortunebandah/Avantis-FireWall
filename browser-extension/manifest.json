@@ -3,7 +3,7 @@
   "name": "Avantis FireWall Search Protection",
   "version": "1.0.0",
   "description": "Blocks configured risky search terms and domains in Chrome.",
-  "permissions": [],
+  "permissions": ["storage"],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [
     {
@@ -17,5 +17,9 @@
       "resources": ["rules.json"],
       "matches": ["<all_urls>"]
     }
-  ]
+  ],
+  "action": {
+    "default_title": "Avantis Safety Center",
+    "default_popup": "safety.html"
+  }
 }
