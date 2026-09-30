@@ -1,0 +1,70 @@
+{
+  "blocked_domains": [
+    "pornhub.com",
+    "xvideos.com",
+    "xnxx.com",
+    "bet365.com",
+    "casino.com",
+    "888casino.com",
+    "pokerstars.com",
+    "betting.co.zw",
+    "beulabet.com",
+    "bezbets.co.zw",
+    "africabet.com",
+    "betway.co.zw",
+    "hollywoodbets.co.zw",
+    "sportingbet.co.zw",
+    "zimbet.co.zw",
+    "1xbet.co.zw",
+    "parimatch.co.zw",
+    "stake.com",
+    "1xbet.com",
+    "betway.com",
+    "betano.com",
+    "betfair.com",
+    "unibet.com",
+    "bwin.com",
+    "ladbrokes.com",
+    "williamhill.com",
+    "paddypower.com",
+    "betvictor.com",
+    "22bet.com",
+    "melbet.com",
+    "mostbet.com",
+    "roobet.com",
+    "rollbit.com",
+    "duckbet.com",
+    "redtube.com",
+    "youporn.com",
+    "xhamster.com",
+    "xnxx.tv",
+    "spankbang.com",
+    "chaturbate.com",
+    "cam4.com",
+    "onlyfans.com"
+  ],
+  "categories": {
+    "adult": [
+      "adult", "porn", "porno", "pornhub", "sex", "xxx", "xvideos",
+      "nude", "nudity", "strip", "erotic", "playboy", "asian porn",
+      "pornography", "explicit", "xxx video", "sex cam", "cam girl",
+      "escort", "hookup"
+    ],
+    "gambling": [
+      "casino", "gambling", "betting", "roulette", "poker", "slot",
+      "jackpot", "lottery", "sportsbook", "baccarat", "sports betting",
+      "live betting", "virtual betting", "betting tips", "casino online",
+      "aviator", "crash game", "bet slip", "odds", "bookmaker", "bookie",
+      "slot games"
+    ],
+    "malware": [
+      "crack", "keygen", "warez", "nulled", "r57", "download free",
+      "torrent", "serial key", "activator", "pirated", "cheat", "mod apk"
+    ],
+    "scam": [
+      "free money", "bitcoin generator", "lottery winner", "fake rewards",
+      "clickbank scam", "crypto scam", "giveaway", "claim reward",
+      "investment scam", "double your money", "urgent payment", "verify account"
+    ]
+  }
+}

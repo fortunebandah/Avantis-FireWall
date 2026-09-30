@@ -58,7 +58,14 @@
       "strip",
       "erotic",
       "playboy",
-      "asian porn"
+      "asian porn",
+      "pornography",
+      "explicit",
+      "xxx video",
+      "sex cam",
+      "cam girl",
+      "escort",
+      "hookup"
     ],
     "gambling": [
       "casino",
@@ -70,7 +77,19 @@
       "jackpot",
       "lottery",
       "sportsbook",
-      "baccarat"
+      "baccarat",
+      "sports betting",
+      "live betting",
+      "virtual betting",
+      "betting tips",
+      "casino online",
+      "aviator",
+      "crash game",
+      "bet slip",
+      "odds",
+      "bookmaker",
+      "bookie",
+      "slot games"
     ],
     "malware": [
       "crack",
@@ -78,7 +97,13 @@
       "warez",
       "nulled",
       "r57",
-      "download free"
+      "download free",
+      "torrent",
+      "serial key",
+      "activator",
+      "pirated",
+      "cheat",
+      "mod apk"
     ],
     "scam": [
       "free money",
@@ -86,7 +111,13 @@
       "lottery winner",
       "fake rewards",
       "clickbank scam",
-      "crypto scam"
+      "crypto scam",
+      "giveaway",
+      "claim reward",
+      "investment scam",
+      "double your money",
+      "urgent payment",
+      "verify account"
     ]
   },
   "subdomain_prefixes": [

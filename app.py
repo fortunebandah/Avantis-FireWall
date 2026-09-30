@@ -18,18 +18,25 @@ DOMAIN_PATTERN = re.compile(r"(?i)(?:https?://)?(?:www\.)?[a-z0-9](?:[a-z0-9.-]*
 DEFAULT_CATEGORIES = {
     "adult": [
         "adult", "porn", "porno", "pornhub", "sex", "xxx", "xvideos",
-        "nude", "nudity", "strip", "erotic", "playboy", "asian porn"
+        "nude", "nudity", "strip", "erotic", "playboy", "asian porn",
+        "pornography", "explicit", "xxx video", "sex cam", "cam girl",
+        "escort", "hookup"
     ],
     "gambling": [
         "casino", "gambling", "betting", "roulette", "poker", "slot",
-        "jackpot", "lottery", "sportsbook", "baccarat"
+        "jackpot", "lottery", "sportsbook", "baccarat", "sports betting",
+        "live betting", "virtual betting", "betting tips", "casino online",
+        "aviator", "crash game", "bet slip", "odds", "bookmaker", "bookie",
+        "slot games"
     ],
     "malware": [
-        "crack", "keygen", "warez", "nulled", "r57", "download free"
+        "crack", "keygen", "warez", "nulled", "r57", "download free",
+        "torrent", "serial key", "activator", "pirated", "cheat", "mod apk"
     ],
     "scam": [
         "free money", "bitcoin generator", "lottery winner", "fake rewards",
-        "clickbank scam", "crypto scam"
+        "clickbank scam", "crypto scam", "giveaway", "claim reward",
+        "investment scam", "double your money", "urgent payment", "verify account"
     ],
 }
 
@@ -138,12 +145,20 @@ def normalize_domain(value: str) -> str:
     return domain.strip(".")
 
 
+def keyword_matches(domain: str, keyword: str) -> bool:
+    searchable = re.sub(r"[^a-z0-9]+", " ", normalize_domain(domain)).strip()
+    search_keyword = re.sub(r"[^a-z0-9]+", " ", keyword.lower()).strip()
+    if not searchable or not search_keyword:
+        return False
+    pattern = rf"(?<![a-z0-9]){re.escape(search_keyword)}(?![a-z0-9])"
+    return re.search(pattern, searchable) is not None
+
+
 def detect_categories(domain: str, categories=None):
     text = normalize_domain(domain)
     found = []
     for category, keywords in (categories or DEFAULT_CATEGORIES).items():
-        lowered_keywords = [kw.lower() for kw in keywords]
-        if any(kw in text for kw in lowered_keywords):
+        if any(keyword_matches(text, keyword) for keyword in keywords):
             found.append(category)
     return found
 
@@ -154,7 +169,7 @@ def analyze_site(site: str, blocklist, categories):
     matched_categories = []
 
     for category, keywords in categories.items():
-        category_matches = [keyword for keyword in keywords if keyword.lower() in domain]
+        category_matches = [keyword for keyword in keywords if keyword_matches(domain, keyword)]
         if category_matches:
             matched_categories.append(category)
             matched_keywords.extend(category_matches)
@@ -380,6 +395,7 @@ class BlockerApp(tk.Tk):
         buttons.pack(fill="x")
 
         ttk.Button(buttons, text="Check URL", command=self.check_url, style="Secondary.TButton").pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="Manage Rules", command=self.open_rule_manager, style="Secondary.TButton").pack(side="left", padx=(0, 8))
         ttk.Button(buttons, text="Add Domain", command=self.add_url, style="Accent.TButton").pack(side="left", padx=(0, 8))
         ttk.Button(buttons, text="Apply to Hosts", command=self.apply_blocking, style="Secondary.TButton").pack(side="left", padx=(0, 8))
         ttk.Button(buttons, text="Run on Startup", command=self.run_on_startup, style="Secondary.TButton").pack(side="left")
@@ -483,6 +499,106 @@ class BlockerApp(tk.Tk):
         self.refresh_listbox()
         self.url_var.set("")
         show_app_dialog(self, "Domain added", f"{len(domains)} domain{'s' if len(domains) != 1 else ''} added to the block list.", "success")
+
+    def open_rule_manager(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("Manage search rules")
+        dialog.geometry("680x560")
+        dialog.minsize(580, 460)
+        dialog.configure(bg="#eaf4f7")
+        dialog.transient(self)
+        if hasattr(self, "window_icon"):
+            dialog.iconphoto(True, self.window_icon)
+
+        header = tk.Frame(dialog, bg="#0b6478", padx=22, pady=16)
+        header.pack(fill="x")
+        tk.Label(header, text="Rule library", bg="#0b6478", fg="#ffffff", font=("Segoe UI", 17, "bold")).pack(anchor="w")
+        tk.Label(header, text="Search, add, and refine the words Avantis FireWall detects", bg="#0b6478", fg="#e2f5f7", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 0))
+
+        body = ttk.Frame(dialog, style="App.TFrame", padding=16)
+        body.pack(fill="both", expand=True)
+        search_var = tk.StringVar()
+        ttk.Label(body, text="Search rules", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        search_entry = ttk.Entry(body, textvariable=search_var)
+        search_entry.pack(fill="x", pady=(4, 12))
+
+        list_frame = ttk.Frame(body, style="Panel.TFrame", padding=10)
+        list_frame.pack(fill="both", expand=True)
+        rule_scroll = ttk.Scrollbar(list_frame, orient="vertical")
+        rule_scroll.pack(side="right", fill="y")
+        rule_list = tk.Listbox(list_frame, selectmode=tk.EXTENDED, font=("Segoe UI", 10), bg="#f8fafc", fg="#16445a", selectbackground="#087f92", selectforeground="#ffffff", relief="flat", borderwidth=0, yscrollcommand=rule_scroll.set)
+        rule_list.pack(side="left", fill="both", expand=True)
+        rule_scroll.config(command=rule_list.yview)
+        visible_rules = []
+
+        def refresh_rules(*_):
+            query = search_var.get().strip().lower()
+            visible_rules.clear()
+            rule_list.delete(0, tk.END)
+            for category, keywords in sorted(self.categories.items()):
+                for keyword in sorted(set(keywords)):
+                    if not query or query in category.lower() or query in keyword.lower():
+                        visible_rules.append((category, keyword))
+                        rule_list.insert(tk.END, f"{category}  /  {keyword}")
+
+        search_var.trace_add("write", refresh_rules)
+        refresh_rules()
+
+        editor = ttk.Frame(body, style="Panel.TFrame", padding=(0, 12, 0, 0))
+        editor.pack(fill="x")
+        category_var = tk.StringVar(value="gambling")
+        keyword_var = tk.StringVar()
+        ttk.Label(editor, text="Category", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(editor, text="Keyword or phrase", style="Panel.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 0))
+        category_entry = ttk.Entry(editor, textvariable=category_var)
+        category_entry.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        keyword_entry = ttk.Entry(editor, textvariable=keyword_var)
+        keyword_entry.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=(4, 0))
+        editor.columnconfigure(0, weight=1)
+        editor.columnconfigure(1, weight=2)
+
+        actions = ttk.Frame(body, style="App.TFrame")
+        actions.pack(fill="x", pady=(12, 0))
+
+        def add_rule():
+            category = category_var.get().strip().lower()
+            keyword = keyword_var.get().strip().lower()
+            if not category or not keyword:
+                show_app_dialog(dialog, "Incomplete rule", "Enter both a category and a keyword.", "warning")
+                return
+            self.categories.setdefault(category, [])
+            if keyword not in self.categories[category]:
+                self.categories[category].append(keyword)
+                save_rules(self.blocklist, self.categories, self.subdomain_prefixes)
+            keyword_var.set("")
+            refresh_rules()
+
+        def remove_rules():
+            selected = rule_list.curselection()
+            if not selected:
+                show_app_dialog(dialog, "No rules selected", "Select one or more rules to remove.", "warning")
+                return
+            for index in reversed(selected):
+                category, keyword = visible_rules[index]
+                self.categories[category] = [item for item in self.categories[category] if item != keyword]
+                if not self.categories[category]:
+                    del self.categories[category]
+            save_rules(self.blocklist, self.categories, self.subdomain_prefixes)
+            refresh_rules()
+
+        ttk.Button(actions, text="Add Rule", command=add_rule, style="Accent.TButton").pack(side="left")
+        ttk.Button(actions, text="Remove Selected", command=remove_rules, style="Secondary.TButton").pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Close", command=dialog.destroy, style="Secondary.TButton").pack(side="right")
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.update_idletasks()
+        self.update_idletasks()
+        position_x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
+        position_y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{max(position_x, 0)}+{max(position_y, 0)}")
+        dialog.grab_set()
+        search_entry.focus_set()
+        self.wait_window(dialog)
 
     def add_multiple(self):
         value = self.bulk_text.get("1.0", tk.END).strip()

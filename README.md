@@ -54,6 +54,17 @@ Windows hosts files do not support wildcard rules. To cover common subdomains, t
 
 Use the **Bulk import** box in the app. Paste domains separated by new lines, commas, semicolons, or spaces, then click **Add All**. Click **Import File** to scan `.txt`, `.csv`, `.json`, or `.docx` files for domain names. Duplicate domains already in the list are ignored automatically. Hold `Ctrl` while selecting domains in the list to remove several at once with **Remove Selected**.
 
+## Browser search protection
+
+The desktop app protects domains through Windows hosts rules. To also block search terms such as `betting` or `casino` before search results appear, install the Chrome extension in `browser-extension`:
+
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Select **Load unpacked** and choose the `browser-extension` folder.
+4. Reload the extension after changing its `rules.json`.
+
+The extension supports Google, Bing, DuckDuckGo, and Yahoo search pages, plus direct blocked-domain visits.
+
 ## Startup option
 
 The app includes a button to add itself to the Windows startup folder so it launches automatically.
