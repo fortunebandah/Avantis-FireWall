@@ -111,6 +111,10 @@ SHORTENER_DOMAINS = {
 }
 SUSPICIOUS_TLDS = {"click", "download", "gq", "loan", "ml", "tk", "top", "work", "zip"}
 PUBLIC_LIST_LIMIT = 5000
+PROTECTED_HOSTS = {
+    "localhost", "127.0.0.1", "microsoft.com", "google.com", "bing.com",
+    "duckduckgo.com", "yahoo.com", "github.com", "openai.com", "copilot.microsoft.com",
+}
 PUBLIC_LISTS = {
     "URLhaus malware hostfile": {
         "url": "https://urlhaus.abuse.ch/downloads/hostfile/",
@@ -388,7 +392,7 @@ def write_hosts_file(blocklist, subdomain_prefixes=None):
     prefixes = subdomain_prefixes or DEFAULT_SUBDOMAIN_PREFIXES
     for domain in blocklist:
         clean = normalize_domain(domain)
-        if clean:
+        if clean and not any(clean == protected or clean.endswith(f".{protected}") for protected in PROTECTED_HOSTS):
             hostnames = [clean] + [f"{prefix}.{clean}" for prefix in prefixes]
             for hostname in hostnames:
                 lines.append(f"127.0.0.1 {hostname}")
