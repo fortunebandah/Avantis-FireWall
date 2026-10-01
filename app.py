@@ -1664,14 +1664,246 @@ class BlockerApp(tk.Tk):
             self.refresh_hosts_status()
             show_app_dialog(self, "Could not remove hosts rules", str(e), "error")
 
+class DesktopApi:
+    def __init__(self):
+        config = load_config()
+        self.blocklist = [normalize_domain(item) for item in config["blocked_domains"] if str(item).strip()]
+        self.categories = config["categories"]
+        self.subdomain_prefixes = config["subdomain_prefixes"]
+        self.current_profile = config.get("protection_profile", "default")
+        self.profile_password = str(config.get("profile_password", "") or "")
+        self.window = None
+
+    def attach_window(self, window):
+        self.window = window
+
+    def _save_rules(self):
+        save_rules(self.blocklist, self.categories, self.subdomain_prefixes, self.current_profile, self.profile_password)
+
+    def _authorize(self, password, action):
+        if self.current_profile == "child_protection" and self.profile_password and password != self.profile_password:
+            raise PermissionError(f"The admin password is required to {action} in Safe Mode.")
+
+    def _parse_domains(self, value):
+        domains = []
+        seen = set(self.blocklist)
+        for item in re.split(r"[\s,;]+", value):
+            domain = normalize_domain(item)
+            if is_valid_domain(domain) and not is_protected_domain(domain) and domain not in seen:
+                domains.append(domain)
+                seen.add(domain)
+        return domains
+
+    def get_state(self):
+        print("Avantis get_state request received.", flush=True)
+        state = {
+            "blocked_domains": self.blocklist,
+            "categories": self.categories,
+            "subdomain_prefixes": self.subdomain_prefixes,
+            "protection_profile": self.current_profile,
+            "has_profile_password": bool(self.profile_password),
+            "hosts_status": inspect_hosts_rules(),
+            "activity": load_activity(),
+        }
+        print("Avantis get_state request completed.", flush=True)
+        return state
+
+    def analyze_site(self, site):
+        result = analyze_site(site, self.blocklist, self.categories, load_dns_blocklist())
+        record_activity("manual_check", result["domain"], f"{result['level']} ({result['score']}/100); {result['recommendation']}")
+        return result
+
+    def add_domains(self, value, password=""):
+        self._authorize(password, "add domains")
+        domains = self._parse_domains(value)
+        if not domains:
+            raise ValueError("No valid new domains were found.")
+        self.blocklist.extend(domains)
+        self._save_rules()
+        return {"added": domains, "state": self.get_state()}
+
+    def import_file(self, password=""):
+        self._authorize(password, "import domains")
+        import webview
+
+        selection = self.window.create_file_dialog(
+            webview.OPEN_DIALOG,
+            allow_multiple=False,
+            file_types=("Supported files (*.txt;*.csv;*.json;*.docx)", "All files (*.*)"),
+        )
+        if not selection:
+            return {"added": [], "state": self.get_state()}
+
+        selected_path = selection[0] if isinstance(selection, (list, tuple)) else selection
+        path = Path(selected_path)
+        if path.suffix.lower() == ".docx":
+            document = Document(path)
+            text_parts = [paragraph.text for paragraph in document.paragraphs]
+            text_parts.extend(cell.text for table in document.tables for row in table.rows for cell in row.cells)
+            text = "\n".join(text_parts)
+        elif path.suffix.lower() == ".json":
+            with path.open("r", encoding="utf-8") as file:
+                text = json.dumps(json.load(file))
+        else:
+            text = path.read_text(encoding="utf-8-sig", errors="ignore")
+
+        domains = self._parse_domains(text)
+        if not domains:
+            raise ValueError("The selected file did not contain any new valid domains.")
+        self.blocklist.extend(domains)
+        self._save_rules()
+        return {"added": domains, "source": path.name, "state": self.get_state()}
+
+    def change_profile(self, profile, password="", new_password=""):
+        if profile not in {"default", "child_protection"}:
+            raise ValueError("Unknown protection profile.")
+        if profile == self.current_profile:
+            return self.get_state()
+        if self.profile_password and password != self.profile_password:
+            raise PermissionError("The admin password is required to change the protection profile.")
+        if profile == "child_protection" and not self.profile_password:
+            if not new_password.strip():
+                raise ValueError("Set a password before enabling Safe Mode.")
+            self.profile_password = new_password.strip()
+        self.current_profile = profile
+        self._save_rules()
+        return self.get_state()
+
+    def admin_access(self, password=""):
+        if self.current_profile == "child_protection" and self.profile_password and password != self.profile_password:
+            raise PermissionError("The admin password is incorrect.")
+        return {
+            "profile": self.current_profile,
+            "has_profile_password": bool(self.profile_password),
+            "blocked_count": len(self.blocklist),
+        }
+
+    def set_profile_password(self, current_password, new_password):
+        if self.profile_password and current_password != self.profile_password:
+            raise PermissionError("The current admin password is incorrect.")
+        self.profile_password = new_password.strip()
+        self._save_rules()
+        return self.get_state()
+
+    def restore_admin(self, password=""):
+        if self.profile_password and password != self.profile_password:
+            raise PermissionError("The admin password is incorrect.")
+        self.current_profile = "default"
+        self._save_rules()
+        return self.get_state()
+
+    def remove_domains(self, domains, password=""):
+        self._authorize(password, "remove domains")
+        selected = set(domains)
+        self.blocklist = [domain for domain in self.blocklist if domain not in selected]
+        self._save_rules()
+        return self.get_state()
+
+    def clear_domains(self, password=""):
+        self._authorize(password, "clear the blocked list")
+        self.blocklist.clear()
+        self._save_rules()
+        return self.get_state()
+
+    def add_rule(self, category, keyword, password=""):
+        self._authorize(password, "edit the rule library")
+        category = category.strip().lower()
+        keyword = keyword.strip().lower()
+        if not category or not keyword:
+            raise ValueError("Enter both a category and a keyword.")
+        self.categories.setdefault(category, [])
+        if keyword not in self.categories[category]:
+            self.categories[category].append(keyword)
+            self._save_rules()
+        return self.get_state()
+
+    def remove_rules(self, rules, password=""):
+        self._authorize(password, "edit the rule library")
+        for rule in rules:
+            category = rule.get("category")
+            keyword = rule.get("keyword")
+            if category in self.categories:
+                self.categories[category] = [item for item in self.categories[category] if item != keyword]
+                if not self.categories[category]:
+                    del self.categories[category]
+        self._save_rules()
+        return self.get_state()
+
+    def get_dictionary(self):
+        entries = []
+        for domain in sorted(set(self.blocklist)):
+            categories = detect_categories(domain, self.categories)
+            entries.append({"type": "Domain", "entry": domain, "category": ", ".join(categories) if categories else "custom block", "meaning": "Blocked domain and its configured subdomains."})
+        for category, keywords in sorted(self.categories.items()):
+            meaning = CATEGORY_DESCRIPTIONS.get(category, "Custom detection category.")
+            entries.extend({"type": "Word", "entry": keyword, "category": category, "meaning": meaning} for keyword in sorted(set(keywords)))
+        entries.extend({"type": "Prefix", "entry": prefix, "category": "hostname", "meaning": f"Common subdomain prefix such as {prefix}.example.com."} for prefix in sorted(set(self.subdomain_prefixes)))
+        return entries
+
+    def update_retention(self, retention_hours):
+        retention_hours = int(retention_hours)
+        if retention_hours not in RETENTION_OPTIONS.values():
+            raise ValueError("Choose a supported activity retention period.")
+        activity = load_activity()
+        save_activity(activity["events"], retention_hours)
+        return load_activity()
+
+    def clear_activity(self):
+        activity = load_activity()
+        save_activity([], activity["retention_hours"])
+        return load_activity()
+
+    def apply_hosts(self):
+        if len(self.blocklist) > HOSTS_DOMAIN_LIMIT:
+            raise ValueError(f"Windows hosts mode is limited to {HOSTS_DOMAIN_LIMIT} domains. Export a DNS feed for larger lists.")
+        write_hosts_file(self.blocklist, self.subdomain_prefixes)
+        flushed, error = flush_dns_cache()
+        return {"flushed": flushed, "error": error, "hosts_status": inspect_hosts_rules()}
+
+    def remove_hosts(self):
+        removed = remove_hosts_rules()
+        flushed, error = flush_dns_cache()
+        return {"removed": removed, "flushed": flushed, "error": error, "hosts_status": inspect_hosts_rules()}
+
+    def export_dns_feed(self):
+        import webview
+
+        selection = self.window.create_file_dialog(webview.SAVE_DIALOG, save_filename="avantis-dns-blocklist.txt", file_types=("DNS domain list (*.txt)",))
+        if not selection:
+            return {"cancelled": True}
+        domains = sorted({domain for domain in self.blocklist if not is_protected_domain(domain)})
+        selected_path = selection[0] if isinstance(selection, (list, tuple)) else selection
+        Path(selected_path).write_text("\n".join(domains) + "\n", encoding="utf-8")
+        return {"cancelled": False, "count": len(domains)}
+
+
 def main():
     if os.name == "nt" and not is_admin():
         if relaunch_as_admin():
             return
         return
 
-    app = BlockerApp()
-    app.mainloop()
+    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
+    import webview
+
+    api = DesktopApi()
+    interface_path = (Path(__file__).with_name("web") / "dist" / "index.html").resolve()
+    if not interface_path.is_file():
+        raise FileNotFoundError("The React interface is not built yet. Run npm.cmd install and npm.cmd run build from the web folder.")
+
+    window = webview.create_window(
+        "Avantis FireWall",
+        str(interface_path),
+        js_api=api,
+        min_size=(860, 640),
+        width=1180,
+        height=820,
+    )
+    api.attach_window(window)
+    print(f"Avantis loading interface: {interface_path}", flush=True)
+    window.events.loaded += lambda: print("Avantis React document loaded.", flush=True)
+    window.events._pywebviewready += lambda: print("Avantis Python bridge ready.", flush=True)
+    webview.start(gui="qt")
 
 
 if __name__ == "__main__":

@@ -3,3 +3,5 @@ __pycache__/
 *$py.class
 activity.json
 hosts.avantis.backup
+web/node_modules/
+web/dist/

@@ -11,17 +11,41 @@ Avantis FireWall is a simple Windows desktop app that blocks suspicious websites
 - Adds the blocked domains to the Windows hosts file so they resolve to `127.0.0.1`
 - Saves your custom block list and detection keywords in `rules.json`
 
-## Run the app
+## Install and run on Windows
 
-1. Open a terminal in this folder.
-2. Run:
+Prerequisites: Python 3.12 and Node.js 18 or newer. Node.js is only needed to build the interface; it is not needed to launch the app after the build completes.
+
+Open PowerShell in the project folder and create a virtual environment:
 
 ```powershell
-pip install -r requirements.txt
-python app.py
+python -m venv .venv
 ```
 
-3. If Windows blocks access to the hosts file, run the app as Administrator.
+Install the Python runtime and desktop UI dependencies into that environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Build the React interface:
+
+```powershell
+cd web
+npm.cmd install
+npm.cmd run build
+cd ..
+```
+
+Launch the desktop app from the project folder:
+
+```powershell
+.\.venv\Scripts\python.exe app.py
+```
+
+Windows may ask for administrator approval so Avantis can manage hosts-file protection. The React interface runs in a local Qt WebEngine window and calls the Python protection logic; it does not use a web server or remote service.
+
+The interface is organized into four sections: **Protection** for risk analysis and hosts controls, **Import domains** for pasted or file-based lists, **Blocked domains** for managing the active list, and **Insights & rules** for activity, dictionary, and rule editing. Safe Mode continues to restrict editing and hides the admin sections.
 
 The app is organized into four tabs: **Protect** for risk analysis and hosts controls, **Import** for manually pasted or file-based domains, **Domains** for reviewing the active blocklist, and **Insights** for the Safety Center, dictionary, and rule editor.
 
