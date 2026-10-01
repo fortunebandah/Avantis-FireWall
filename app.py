@@ -9,7 +9,7 @@ import sys
 import tkinter as tk
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, simpledialog, ttk
 from urllib.parse import urlparse
 from PIL import Image, ImageTk
 from docx import Document
@@ -19,6 +19,13 @@ HOSTS_BACKUP_PATH = Path(__file__).with_name("hosts.avantis.backup")
 RULES_FILE = Path(__file__).with_name("rules.json")
 ACTIVITY_FILE = Path(__file__).with_name("activity.json")
 LOGO_FILE = Path(__file__).with_name("Images") / "Avantis-logo-prl.png"
+DNS_BLOCKLIST_FILENAMES = (
+    "avantis-dns-blocklist",
+    "avantis-dns-blocklist.txt",
+    "avantis dns blocklist.txt",
+)
+PROFILE_LABELS = {"default": "Admin", "child_protection": "Safe Mode"}
+PROFILE_VALUES = {label: value for value, label in PROFILE_LABELS.items()}
 DOMAIN_PATTERN = re.compile(r"(?i)(?:https?://)?(?:www\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}")
 VALID_DOMAIN_PATTERN = re.compile(r"(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
@@ -137,6 +144,8 @@ def default_rules():
         "blocked_domains": DEFAULT_BLOCKLIST[:],
         "categories": {category: keywords[:] for category, keywords in DEFAULT_CATEGORIES.items()},
         "subdomain_prefixes": DEFAULT_SUBDOMAIN_PREFIXES[:],
+        "protection_profile": "default",
+        "profile_password": "",
     }
 
 
@@ -170,6 +179,11 @@ def load_config():
                     for prefix in data["subdomain_prefixes"]
                     if str(prefix).strip()
                 ]
+            profile_name = str(data.get("protection_profile", "default")).strip().lower()
+            if profile_name in {"default", "child_protection"}:
+                config["protection_profile"] = profile_name
+            password_value = data.get("profile_password", "")
+            config["profile_password"] = str(password_value) if password_value is not None else ""
             return config
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         pass
@@ -202,6 +216,46 @@ def is_valid_domain(domain: str) -> bool:
 
 def is_protected_domain(domain: str) -> bool:
     return any(domain == protected or domain.endswith(f".{protected}") for protected in PROTECTED_DOMAINS)
+
+
+def load_dns_blocklist(directory=None):
+    root = Path(directory) if directory is not None else Path(__file__).resolve().parent
+    domains = set()
+
+    for filename in DNS_BLOCKLIST_FILENAMES:
+        path = root / filename
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+
+        for line in lines:
+            content = line.split("#", 1)[0].strip()
+            if not content:
+                continue
+
+            entries = re.split(r"[\s,;]+", content)
+            try:
+                ipaddress.ip_address(entries[0])
+                entries = entries[1:]
+            except ValueError:
+                pass
+
+            for entry in entries:
+                labels = entry.split(".")
+                if len(labels) > 4:
+                    try:
+                        address = ipaddress.ip_address(".".join(labels[:4]))
+                    except ValueError:
+                        address = None
+                    if isinstance(address, ipaddress.IPv4Address):
+                        entry = ".".join(labels[4:])
+
+                domain = normalize_domain(entry)
+                if is_valid_domain(domain) and not is_protected_domain(domain):
+                    domains.add(domain)
+
+    return domains
 
 
 def keyword_matches(domain: str, keyword: str) -> bool:
@@ -282,7 +336,7 @@ def smart_signals(site: str, domain: str, blocklist):
     return signals
 
 
-def analyze_site(site: str, blocklist, categories):
+def analyze_site(site: str, blocklist, categories, dns_blocklist=()):
     domain = normalize_domain(site)
     matched_keywords = []
     matched_categories = []
@@ -294,6 +348,8 @@ def analyze_site(site: str, blocklist, categories):
             matched_keywords.extend(category_matches)
 
     is_blocked = any(domain == blocked or domain.endswith(f".{blocked}") for blocked in blocklist)
+    dns_feed_blocked = any(domain == blocked or domain.endswith(f".{blocked}") for blocked in dns_blocklist)
+    is_blocked = is_blocked or dns_feed_blocked
     signals = smart_signals(site, domain, blocklist) if domain else []
     score = min(100, len(set(matched_keywords)) * 15 + len(matched_categories) * 10 + (70 if is_blocked else 0) + sum(weight for weight, _ in signals))
     if score >= 70:
@@ -313,6 +369,7 @@ def analyze_site(site: str, blocklist, categories):
     return {
         "domain": domain,
         "blocked": is_blocked,
+        "dns_feed_blocked": dns_feed_blocked,
         "categories": matched_categories,
         "keywords": list(dict.fromkeys(matched_keywords)),
         "signals": [message for _, message in signals],
@@ -322,7 +379,7 @@ def analyze_site(site: str, blocklist, categories):
     }
 
 
-def save_rules(blocklist, categories, subdomain_prefixes=None):
+def save_rules(blocklist, categories, subdomain_prefixes=None, protection_profile="default", profile_password=""):
     unique = []
     seen = set()
     for item in blocklist:
@@ -331,11 +388,17 @@ def save_rules(blocklist, categories, subdomain_prefixes=None):
             unique.append(domain)
             seen.add(domain)
 
+    profile_value = str(protection_profile or "default").strip().lower()
+    if profile_value not in {"default", "child_protection"}:
+        profile_value = "default"
+
     with RULES_FILE.open("w", encoding="utf-8") as f:
         json.dump({
             "blocked_domains": unique,
             "categories": categories,
             "subdomain_prefixes": subdomain_prefixes or DEFAULT_SUBDOMAIN_PREFIXES,
+            "protection_profile": profile_value,
+            "profile_password": str(profile_password or ""),
         }, f, indent=2)
 
 def load_activity():
@@ -563,6 +626,7 @@ def show_app_dialog(parent, title, message, kind="info", confirm=False):
         "success": ("#16805c", "Success"),
         "warning": ("#b7791f", "Review"),
         "error": ("#c24141", "Action required"),
+        "risk": ("#b42318", "RISK FLAGGED"),
     }
     accent, label = palette[kind]
     result = {"value": False}
@@ -574,10 +638,17 @@ def show_app_dialog(parent, title, message, kind="info", confirm=False):
     if hasattr(parent, "window_icon"):
         dialog.iconphoto(True, parent.window_icon)
 
-    header = tk.Frame(dialog, bg="#0b6478", padx=20, pady=14)
+    header_bg = accent if kind == "risk" else "#0b6478"
+    header = tk.Frame(dialog, bg=header_bg, padx=20, pady=14)
     header.pack(fill="x")
-    tk.Label(header, text=label, bg="#0b6478", fg="#ffffff", font=("Segoe UI", 10, "bold")).pack(anchor="w")
-    tk.Label(header, text=title, bg="#0b6478", fg="#ffffff", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(2, 0))
+    if kind == "risk":
+        risk_row = tk.Frame(header, bg=header_bg)
+        risk_row.pack(anchor="w")
+        tk.Label(risk_row, text="⚠", bg=header_bg, fg="#ffffff", font=("Segoe UI Symbol", 18, "bold")).pack(side="left", padx=(0, 7))
+        tk.Label(risk_row, text=label, bg=header_bg, fg="#ffffff", font=("Segoe UI", 10, "bold")).pack(side="left")
+    else:
+        tk.Label(header, text=label, bg=header_bg, fg="#ffffff", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+    tk.Label(header, text=title, bg=header_bg, fg="#ffffff", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(2, 0))
 
     body = tk.Frame(dialog, bg="#ffffff", padx=20, pady=18)
     body.pack(fill="both", expand=True)
@@ -638,14 +709,19 @@ class BlockerApp(tk.Tk):
         style.configure("CardValue.TLabel", background="#ffffff", foreground="#0b6478", font=("Segoe UI", 22, "bold"))
         style.configure("CardTitle.TLabel", background="#ffffff", foreground="#527184", font=("Segoe UI", 9, "bold"))
         style.configure("CardNote.TLabel", background="#ffffff", foreground="#7b93a0", font=("Segoe UI", 9))
+        style.configure("SecurityCard.TFrame", background="#eaf4f7")
+        style.configure("SecureBadge.TLabel", background="#0b6478", foreground="#ffffff", font=("Segoe UI", 11, "bold"))
 
         config = load_config()
         self.blocklist = [normalize_domain(item) for item in config["blocked_domains"] if str(item).strip()]
         self.categories = config["categories"]
         self.subdomain_prefixes = config["subdomain_prefixes"]
+        self.current_profile = config.get("protection_profile", "default")
+        self.profile_password = str(config.get("profile_password", "") or "")
         self.create_widgets()
         self.refresh_listbox()
         self.refresh_hosts_status()
+        self.bind_all("<Control-Shift-P>", self.handle_admin_access)
 
     def create_widgets(self):
         header = ttk.Frame(self, style="Header.TFrame", padding=(26, 20))
@@ -672,8 +748,9 @@ class BlockerApp(tk.Tk):
         content = ttk.Frame(self, style="App.TFrame", padding=(18, 14))
         content.pack(fill="both", expand=True)
 
-        notebook = ttk.Notebook(content)
-        notebook.pack(fill="both", expand=True)
+        self.notebook = ttk.Notebook(content)
+        self.notebook.pack(fill="both", expand=True)
+        notebook = self.notebook
 
         protect_tab = ttk.Frame(notebook, style="App.TFrame", padding=14)
         import_tab = ttk.Frame(notebook, style="App.TFrame", padding=14)
@@ -684,12 +761,47 @@ class BlockerApp(tk.Tk):
         notebook.add(domains_tab, text="Domains")
         notebook.add(insights_tab, text="Insights")
 
-        input_frame = ttk.Frame(protect_tab, style="Panel.TFrame", padding=18)
+        profile_panel = ttk.Frame(protect_tab, style="Panel.TFrame", padding=(18, 18, 18, 14))
+        profile_panel.pack(fill="x", pady=(0, 12))
+
+        mode_header = ttk.Frame(profile_panel, style="Panel.TFrame")
+        mode_header.pack(fill="x")
+        ttk.Label(mode_header, text="Protection mode", style="Panel.TLabel", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self.profile_status_label = ttk.Label(mode_header, text="", style="Muted.TLabel")
+        self.profile_status_label.pack(anchor="e", pady=(0, 6))
+
+        mode_card = tk.Frame(profile_panel, bg="#edf8fb", highlightbackground="#a9d8e4", highlightthickness=1, padx=18, pady=18)
+        mode_card.pack(fill="x")
+
+        mode_left = tk.Frame(mode_card, bg="#edf8fb")
+        mode_left.pack(side="left", fill="x", expand=True)
+        self.mode_lock_icon = tk.Label(mode_left, text="🔒", bg="#edf8fb", fg="#0b6478", font=("Segoe UI", 22, "bold"))
+        self.mode_lock_icon.pack(anchor="w", pady=(0, 4))
+        self.current_profile_label = ttk.Label(mode_left, text="Current profile", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))
+        self.current_profile_label.pack(anchor="w")
+        self.profile_var = tk.StringVar(value=PROFILE_LABELS[self.current_profile])
+        self.profile_combo = ttk.Combobox(mode_left, textvariable=self.profile_var, values=list(PROFILE_VALUES), state="readonly", width=22)
+        self.profile_combo.pack(anchor="w", pady=(6, 0))
+        self.profile_combo.bind("<<ComboboxSelected>>", self.handle_profile_change)
+
+        mode_right = tk.Frame(mode_card, bg="#edf8fb")
+        mode_right.pack(side="right", anchor="center")
+        self.profile_badge = tk.Label(mode_right, text="Secure mode", bg="#0b6478", fg="#ffffff", font=("Segoe UI", 11, "bold"), padx=18, pady=8)
+        self.profile_badge.pack(anchor="e")
+        self.set_password_button = ttk.Button(mode_right, text="Set Safe Mode password", command=self.set_profile_password, style="Secondary.TButton")
+        self.set_password_button.pack(anchor="e", pady=(8, 0))
+        self.admin_access_button = ttk.Button(mode_right, text="Admin access", command=self.open_admin_access, style="Accent.TButton")
+        self.admin_access_button.pack(anchor="e", pady=(6, 0))
+        self.refresh_profile_status()
+
+        self.input_frame = ttk.Frame(protect_tab, style="Panel.TFrame", padding=18)
+        input_frame = self.input_frame
         input_frame.pack(fill="x", pady=(0, 12))
         input_frame.columnconfigure(0, weight=3)
         input_frame.columnconfigure(1, weight=2)
 
-        analyze_panel = ttk.Frame(input_frame, style="Panel.TFrame", padding=(0, 0, 14, 0))
+        self.analyze_panel = ttk.Frame(input_frame, style="Panel.TFrame", padding=(0, 0, 14, 0))
+        analyze_panel = self.analyze_panel
         analyze_panel.grid(row=0, column=0, sticky="nsew")
         ttk.Label(analyze_panel, text="Analyze a site", style="Panel.TLabel", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(analyze_panel, text="Check the risk of a URL or domain", style="Muted.TLabel").pack(anchor="w", pady=(2, 6))
@@ -698,7 +810,8 @@ class BlockerApp(tk.Tk):
         check_entry.pack(fill="x", pady=(0, 8))
         ttk.Button(analyze_panel, text="Analyze Risk", command=self.check_url, style="Secondary.TButton").pack(anchor="w")
 
-        add_panel = ttk.Frame(input_frame, style="Panel.TFrame", padding=(14, 0, 0, 0))
+        self.add_panel = ttk.Frame(input_frame, style="Panel.TFrame", padding=(14, 0, 0, 0))
+        add_panel = self.add_panel
         add_panel.grid(row=0, column=1, sticky="nsew")
         ttk.Label(add_panel, text="Add a blocked domain", style="Panel.TLabel", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(add_panel, text="Add a domain to the local blocklist", style="Muted.TLabel").pack(anchor="w", pady=(2, 6))
@@ -707,7 +820,8 @@ class BlockerApp(tk.Tk):
         add_entry.pack(fill="x", pady=(0, 8))
         ttk.Button(add_panel, text="Add Domain", command=self.add_url, style="Accent.TButton").pack(anchor="w")
 
-        host_frame = ttk.Frame(protect_tab, style="Panel.TFrame", padding=18)
+        self.host_frame = ttk.Frame(protect_tab, style="Panel.TFrame", padding=18)
+        host_frame = self.host_frame
         host_frame.pack(fill="x")
         ttk.Label(host_frame, text="Protection controls", style="Panel.TLabel", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(host_frame, text="Apply or remove only Avantis-managed hosts rules. Administrator permission is required.", style="Muted.TLabel").pack(anchor="w", pady=(2, 10))
@@ -720,7 +834,8 @@ class BlockerApp(tk.Tk):
         self.hosts_status_label = ttk.Label(host_frame, text="Hosts file check not run.", style="Muted.TLabel", wraplength=800)
         self.hosts_status_label.pack(anchor="w", pady=(10, 0))
 
-        overview = ttk.Frame(protect_tab, style="App.TFrame")
+        self.overview = ttk.Frame(protect_tab, style="App.TFrame")
+        overview = self.overview
         overview.pack(fill="both", expand=True, pady=(12, 0))
         ttk.Label(overview, text="Protection overview", style="App.TLabel", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
         ttk.Label(overview, text="A quiet view of what Avantis is ready to protect on this computer.", style="App.TLabel").pack(anchor="w", pady=(0, 10))
@@ -794,32 +909,258 @@ class BlockerApp(tk.Tk):
         ttk.Button(controls, text="Remove Selected", command=self.remove_selected, style="Secondary.TButton").pack(side="left", padx=(0, 8))
         ttk.Button(controls, text="Clear All", command=self.clear_all, style="Secondary.TButton").pack(side="left")
 
-        insights_panel = ttk.Frame(insights_tab, style="Panel.TFrame", padding=18)
-        insights_panel.pack(fill="x")
-        ttk.Label(insights_panel, text="Review and tune protection", style="Panel.TLabel", font=("Segoe UI", 12, "bold")).pack(anchor="w")
-        ttk.Label(insights_panel, text="Open focused tools only when you need them.", style="Muted.TLabel").pack(anchor="w", pady=(2, 16))
-        insight_cards = ttk.Frame(insights_panel, style="Panel.TFrame")
+        insights_panel = ttk.Frame(insights_tab, style="App.TFrame", padding=(4, 8))
+        insights_panel.pack(fill="both", expand=True)
+        insights_header = ttk.Frame(insights_panel, style="App.TFrame")
+        insights_header.pack(fill="x")
+        ttk.Label(insights_header, text="Insights & tools", style="App.TLabel", font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        ttk.Label(insights_header, text="Review activity, look up protection data, and manage detection rules.", style="App.TLabel").pack(anchor="w", pady=(4, 0))
+        tk.Frame(insights_panel, bg="#b7dfe6", height=2).pack(fill="x", pady=(16, 18))
+
+        insight_cards = ttk.Frame(insights_panel, style="App.TFrame")
         insight_cards.pack(fill="x")
         for column in range(3):
-            insight_cards.columnconfigure(column, weight=1)
+            insight_cards.columnconfigure(column, weight=1, uniform="insight-card")
 
-        safety_card = ttk.Frame(insight_cards, style="Card.TFrame", padding=16)
-        safety_card.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        ttk.Label(safety_card, text="SAFETY CENTER", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(safety_card, text="Local audit records", style="CardNote.TLabel").pack(anchor="w", pady=(5, 12))
-        ttk.Button(safety_card, text="Open", command=self.open_safety_center, style="Secondary.TButton").pack(anchor="w")
+        insight_tools = (
+            ("01", "ACTIVITY", "Safety Center", "Review locally stored records of manual site checks.", "Review activity", self.open_safety_center, "#087f92"),
+            ("02", "LOOKUP", "Site Dictionary", "Search blocked domains, detection words, and hostname prefixes.", "Search entries", self.open_site_dictionary, "#b7791f"),
+            ("03", "CONFIGURE", "Rule Library", "Add or remove words used by site risk analysis.", "Manage rules", self.open_rule_manager, "#2b7a78"),
+        )
+        for column, (number, category, title, description, action, command, accent) in enumerate(insight_tools):
+            outer_pad = (0, 8) if column == 0 else ((8, 8) if column == 1 else (8, 0))
+            card = tk.Frame(insight_cards, bg="#ffffff", highlightbackground="#c9dce2", highlightthickness=1, padx=0, pady=0)
+            card.grid(row=0, column=column, sticky="nsew", padx=outer_pad)
+            tk.Frame(card, bg=accent, height=4).pack(fill="x")
+            card_body = tk.Frame(card, bg="#ffffff", padx=18, pady=17)
+            card_body.pack(fill="both", expand=True)
+            top_line = tk.Frame(card_body, bg="#ffffff")
+            top_line.pack(fill="x")
+            tk.Label(top_line, text=number, bg=accent, fg="#ffffff", font=("Segoe UI", 10, "bold"), padx=9, pady=5).pack(side="left")
+            tk.Label(top_line, text=category, bg="#ffffff", fg=accent, font=("Segoe UI", 9, "bold")).pack(side="left", padx=(10, 0))
+            tk.Label(card_body, text=title, bg="#ffffff", fg="#163b4d", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(17, 5))
+            tk.Label(card_body, text=description, bg="#ffffff", fg="#5f7f8f", font=("Segoe UI", 9), justify="left", anchor="w", wraplength=235, height=3).pack(fill="x")
+            ttk.Button(card_body, text=action, command=command, style="Secondary.TButton").pack(anchor="w", pady=(18, 0))
 
-        dictionary_card = ttk.Frame(insight_cards, style="Card.TFrame", padding=16)
-        dictionary_card.grid(row=0, column=1, sticky="nsew", padx=6)
-        ttk.Label(dictionary_card, text="SITE DICTIONARY", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(dictionary_card, text="Search domains and words", style="CardNote.TLabel").pack(anchor="w", pady=(5, 12))
-        ttk.Button(dictionary_card, text="Open", command=self.open_site_dictionary, style="Secondary.TButton").pack(anchor="w")
+        self.restricted_tabs = (import_tab, domains_tab, insights_tab)
+        self.refresh_profile_visibility()
 
-        rules_card = ttk.Frame(insight_cards, style="Card.TFrame", padding=16)
-        rules_card.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
-        ttk.Label(rules_card, text="RULE LIBRARY", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(rules_card, text="Tune local categories", style="CardNote.TLabel").pack(anchor="w", pady=(5, 12))
-        ttk.Button(rules_card, text="Open", command=self.open_rule_manager, style="Secondary.TButton").pack(anchor="w")
+    def save_current_rules(self):
+        save_rules(self.blocklist, self.categories, self.subdomain_prefixes, self.current_profile, self.profile_password)
+
+    def refresh_profile_status(self):
+        if self.current_profile == "child_protection":
+            if self.profile_password:
+                self.profile_status_label.config(text="Locked · admin password required")
+                badge_text = "SAFE MODE"
+                badge_bg = "#0b6478"
+            else:
+                self.profile_status_label.config(text="Password not set")
+                badge_text = "SAFE MODE"
+                badge_bg = "#b7791f"
+        else:
+            self.profile_status_label.config(text="Editing enabled")
+            badge_text = "ADMIN"
+            badge_bg = "#2b7a78"
+
+        if hasattr(self, "profile_badge"):
+            self.profile_badge.config(text=badge_text, bg=badge_bg)
+        if hasattr(self, "mode_lock_icon"):
+            self.mode_lock_icon.config(text="🔒" if self.current_profile == "child_protection" else "🛡️")
+
+        self.refresh_profile_visibility()
+
+    def refresh_profile_visibility(self):
+        if not hasattr(self, "restricted_tabs"):
+            return
+
+        child_mode = self.current_profile == "child_protection"
+        tab_state = "hidden" if child_mode else "normal"
+        for tab in self.restricted_tabs:
+            self.notebook.tab(tab, state=tab_state)
+
+        if child_mode:
+            self.admin_access_button.config(text="Admin access")
+            self.current_profile_label.pack_forget()
+            self.profile_combo.pack_forget()
+            self.set_password_button.pack_forget()
+            self.admin_access_button.pack(anchor="e", pady=(8, 0))
+            self.add_panel.grid_remove()
+            self.analyze_panel.grid_configure(columnspan=2, padx=0)
+            self.input_frame.columnconfigure(0, weight=1)
+            self.input_frame.columnconfigure(1, weight=0)
+            self.host_frame.pack_forget()
+            self.overview.pack_forget()
+        else:
+            self.admin_access_button.pack_forget()
+            self.current_profile_label.pack(anchor="w")
+            self.profile_combo.pack(anchor="w", pady=(6, 0))
+            self.set_password_button.pack(anchor="e", pady=(8, 0))
+            self.analyze_panel.grid_configure(columnspan=1, padx=(0, 14))
+            self.input_frame.columnconfigure(0, weight=3)
+            self.input_frame.columnconfigure(1, weight=2)
+            self.add_panel.grid()
+            self.host_frame.pack(fill="x")
+            self.overview.pack(fill="both", expand=True, pady=(12, 0))
+
+    def handle_admin_access(self, _event=None):
+        if self.current_profile == "child_protection":
+            self.open_admin_access()
+        return "break"
+
+    def open_admin_access(self):
+        if self.current_profile == "child_protection":
+            password = simpledialog.askstring(
+                "Admin access",
+                "Enter the admin password to open Safe Mode controls:",
+                show="*",
+                parent=self,
+            )
+            if password != self.profile_password:
+                show_app_dialog(self, "Access blocked", "The admin password is incorrect.", "warning")
+                return
+
+        dashboard = tk.Toplevel(self)
+        dashboard.title("Admin access")
+        dashboard.configure(bg="#eaf4f7")
+        dashboard.geometry("520x420")
+        dashboard.resizable(False, False)
+        dashboard.transient(self)
+        dashboard.grab_set()
+
+        if hasattr(self, "window_icon"):
+            dashboard.iconphoto(True, self.window_icon)
+
+        header = tk.Frame(dashboard, bg="#0b6478", padx=20, pady=18)
+        header.pack(fill="x")
+        tk.Label(header, text="🔒 Admin access", bg="#0b6478", fg="#ffffff", font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        tk.Label(header, text="Review Safe Mode and manage access controls", bg="#0b6478", fg="#d9f3f7", font=("Segoe UI", 10)).pack(anchor="w", pady=(4, 0))
+
+        body = tk.Frame(dashboard, bg="#ffffff", padx=20, pady=20)
+        body.pack(fill="both", expand=True)
+
+        summary = tk.Frame(body, bg="#ffffff")
+        summary.pack(fill="x")
+        stats = [
+            ("Profile", PROFILE_LABELS[self.current_profile]),
+            ("Password", "Enabled" if self.profile_password else "Disabled"),
+            ("Blocked", str(len(self.blocklist))),
+        ]
+        for idx, (label, value) in enumerate(stats):
+            card = tk.Frame(summary, bg="#edf8fb", highlightbackground="#d0e1e7", highlightthickness=1, padx=12, pady=12)
+            card.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 8, 0))
+            tk.Label(card, text=label, bg="#edf8fb", fg="#58727d", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+            tk.Label(card, text=value, bg="#edf8fb", fg="#0f3140", font=("Segoe UI", 18, "bold")).pack(anchor="w", pady=(4, 0))
+        for column_index in (0, 1, 2):
+            summary.columnconfigure(column_index, weight=1)
+
+        actions = tk.Frame(body, bg="#ffffff")
+        actions.pack(fill="x", pady=(20, 0))
+        tk.Label(actions, text="Controls", bg="#ffffff", fg="#12445b", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+
+        btn_frame = tk.Frame(actions, bg="#ffffff")
+        btn_frame.pack(fill="x", pady=(8, 0))
+        ttk.Button(btn_frame, text="Set / change password", command=lambda: (dashboard.destroy(), self.set_profile_password()), style="Secondary.TButton").pack(side="left", padx=(0, 8))
+        if self.current_profile == "child_protection":
+            ttk.Button(btn_frame, text="Restore Admin", command=lambda: self.restore_admin_profile(dashboard), style="Accent.TButton").pack(side="left")
+        else:
+            ttk.Button(btn_frame, text="Switch profile", command=lambda: (dashboard.destroy(), self.profile_combo.focus_set()), style="Accent.TButton").pack(side="left")
+
+        note = tk.Label(body, text="Only the admin password can turn off Safe Mode and restore Admin mode.", bg="#ffffff", fg="#496573", justify="left", wraplength=440, font=("Segoe UI", 9))
+        note.pack(anchor="w", pady=(18, 0))
+
+        footer = tk.Frame(body, bg="#ffffff")
+        footer.pack(fill="x", pady=(18, 0))
+        ttk.Button(footer, text="Close", command=dashboard.destroy, style="Secondary.TButton").pack(anchor="e")
+
+        dashboard.update_idletasks()
+        self.update_idletasks()
+        position_x = self.winfo_x() + (self.winfo_width() - dashboard.winfo_width()) // 2
+        position_y = self.winfo_y() + (self.winfo_height() - dashboard.winfo_height()) // 2
+        dashboard.geometry(f"+{max(position_x, 0)}+{max(position_y, 0)}")
+
+    def restore_admin_profile(self, dashboard):
+        self.current_profile = "default"
+        self.profile_var.set(PROFILE_LABELS[self.current_profile])
+        self.save_current_rules()
+        self.refresh_profile_status()
+        dashboard.destroy()
+
+    def set_profile_password(self):
+        if self.profile_password:
+            current = simpledialog.askstring(
+                "Current password",
+                "Enter the current admin password to change it:",
+                show="*",
+                parent=self,
+            )
+            if current != self.profile_password:
+                show_app_dialog(self, "Password change denied", "The current password is incorrect.", "warning")
+                return
+
+        new_password = simpledialog.askstring(
+            "Profile password",
+            "Enter a password to lock edits in Safe Mode. Leave blank to disable the lock.",
+            show="*",
+            parent=self,
+        )
+        if new_password is None:
+            return
+        self.profile_password = new_password.strip()
+        self.save_current_rules()
+        self.refresh_profile_status()
+        if self.current_profile == "child_protection" and self.profile_password:
+            show_app_dialog(self, "Safe Mode locked", "The profile is now locked. An admin password is required before editing the block list.", "success")
+
+    def handle_profile_change(self, _event=None):
+        selected = PROFILE_VALUES.get(self.profile_var.get())
+        if selected is None:
+            self.profile_var.set(PROFILE_LABELS[self.current_profile])
+            return
+        if selected == self.current_profile:
+            return
+
+        if self.profile_password and selected != self.current_profile:
+            password = simpledialog.askstring(
+                "Admin password",
+                f"Enter the admin password to change from {PROFILE_LABELS[self.current_profile]} to {PROFILE_LABELS[selected]}:",
+                show="*",
+                parent=self,
+            )
+            if password != self.profile_password:
+                self.profile_var.set(PROFILE_LABELS[self.current_profile])
+                show_app_dialog(self, "Access blocked", "Only the admin password can change the protection profile.", "warning")
+                return
+
+        if selected == "child_protection" and not self.profile_password:
+            answer = simpledialog.askstring(
+                "Set Safe Mode password",
+                "Enter a password to lock changes in Safe Mode. Leave blank to stay in Admin mode.",
+                show="*",
+                parent=self,
+            )
+            if answer is None or not answer.strip():
+                self.profile_var.set(PROFILE_LABELS[self.current_profile])
+                return
+            self.profile_password = answer.strip()
+
+        self.current_profile = selected
+        self.save_current_rules()
+        self.refresh_profile_status()
+
+    def require_profile_password(self, action_name):
+        if self.current_profile != "child_protection" or not self.profile_password:
+            return True
+        password = simpledialog.askstring(
+            "Password required",
+            f"Enter the admin password to {action_name} in Safe Mode:",
+            show="*",
+            parent=self,
+        )
+        if password == self.profile_password:
+            return True
+        show_app_dialog(self, "Access blocked", "This profile is locked. Only the admin password can edit the hosts rules or block list.", "warning")
+        return False
 
     def refresh_listbox(self):
         self.listbox.delete(0, tk.END)
@@ -861,7 +1202,7 @@ class BlockerApp(tk.Tk):
             show_app_dialog(self, "Missing website", "Please enter a website or domain.", "warning")
             return
 
-        result = analyze_site(site, self.blocklist, self.categories)
+        result = analyze_site(site, self.blocklist, self.categories, load_dns_blocklist())
         record_activity(
             "manual_check",
             result["domain"],
@@ -872,7 +1213,9 @@ class BlockerApp(tk.Tk):
             return
 
         reasons = []
-        if result["blocked"]:
+        if result["dns_feed_blocked"]:
+            reasons.append("listed in the Avantis DNS blocklist feed")
+        elif result["blocked"]:
             reasons.append("already blocked or a subdomain of a blocked site")
         if result["categories"]:
             reasons.append(f"categories: {', '.join(result['categories'])}")
@@ -883,11 +1226,17 @@ class BlockerApp(tk.Tk):
         reasons.append(f"recommendation: {result['recommendation']}")
 
         if reasons:
+            if result["blocked"] or result["level"] == "High risk":
+                dialog_kind = "risk"
+            elif result["level"] == "Review":
+                dialog_kind = "warning"
+            else:
+                dialog_kind = "success"
             show_app_dialog(
                 self,
                 f"{result['level']} ({result['score']}/100)",
                 f"{result['domain']}\n\n" + "\n".join(reasons),
-                "warning",
+                dialog_kind,
             )
         else:
             show_app_dialog(self, f"{result['level']} ({result['score']}/100)", f"{result['domain']}\n\n{result['recommendation']}", "success")
@@ -965,6 +1314,8 @@ class BlockerApp(tk.Tk):
         self.wait_window(dialog)
 
     def add_url(self):
+        if not self.require_profile_password("add domains"):
+            return
         site = self.add_var.get().strip()
         if not site:
             show_app_dialog(self, "Missing website", "Type a website first.", "warning")
@@ -976,7 +1327,7 @@ class BlockerApp(tk.Tk):
             return
 
         self.blocklist.extend(domains)
-        save_rules(self.blocklist, self.categories, self.subdomain_prefixes)
+        self.save_current_rules()
         self.refresh_listbox()
         self.add_var.set("")
         show_app_dialog(self, "Domain added", f"{len(domains)} domain{'s' if len(domains) != 1 else ''} added to the block list.", "success")
@@ -1059,6 +1410,8 @@ class BlockerApp(tk.Tk):
         self.wait_window(dialog)
 
     def open_rule_manager(self):
+        if not self.require_profile_password("edit the rule library"):
+            return
         dialog = tk.Toplevel(self)
         dialog.title("Manage search rules")
         dialog.geometry("680x560")
@@ -1119,6 +1472,8 @@ class BlockerApp(tk.Tk):
         actions.pack(fill="x", pady=(12, 0))
 
         def add_rule():
+            if not self.require_profile_password("add a rule"):
+                return
             category = category_var.get().strip().lower()
             keyword = keyword_var.get().strip().lower()
             if not category or not keyword:
@@ -1127,11 +1482,13 @@ class BlockerApp(tk.Tk):
             self.categories.setdefault(category, [])
             if keyword not in self.categories[category]:
                 self.categories[category].append(keyword)
-                save_rules(self.blocklist, self.categories, self.subdomain_prefixes)
+                self.save_current_rules()
             keyword_var.set("")
             refresh_rules()
 
         def remove_rules():
+            if not self.require_profile_password("remove rules"):
+                return
             selected = rule_list.curselection()
             if not selected:
                 show_app_dialog(dialog, "No rules selected", "Select one or more rules to remove.", "warning")
@@ -1141,7 +1498,7 @@ class BlockerApp(tk.Tk):
                 self.categories[category] = [item for item in self.categories[category] if item != keyword]
                 if not self.categories[category]:
                     del self.categories[category]
-            save_rules(self.blocklist, self.categories, self.subdomain_prefixes)
+            self.save_current_rules()
             refresh_rules()
 
         ttk.Button(actions, text="Add Rule", command=add_rule, style="Accent.TButton").pack(side="left")
@@ -1159,6 +1516,8 @@ class BlockerApp(tk.Tk):
         self.wait_window(dialog)
 
     def add_multiple(self):
+        if not self.require_profile_password("import domains"):
+            return
         value = self.bulk_text.get("1.0", tk.END).strip()
         if not value:
             show_app_dialog(self, "Nothing to import", "Paste at least one domain first.", "warning")
@@ -1170,12 +1529,14 @@ class BlockerApp(tk.Tk):
             return
 
         self.blocklist.extend(domains)
-        save_rules(self.blocklist, self.categories, self.subdomain_prefixes)
+        self.save_current_rules()
         self.refresh_listbox()
         self.bulk_text.delete("1.0", tk.END)
         show_app_dialog(self, "Bulk import complete", f"{len(domains)} domain{'s' if len(domains) != 1 else ''} added to the block list.", "success")
 
     def import_file(self):
+        if not self.require_profile_password("import domains from a file"):
+            return
         file_path = filedialog.askopenfilename(
             parent=self,
             title="Import blocked sites",
@@ -1209,13 +1570,15 @@ class BlockerApp(tk.Tk):
                 return
 
             self.blocklist.extend(domains)
-            save_rules(self.blocklist, self.categories, self.subdomain_prefixes)
+            self.save_current_rules()
             self.refresh_listbox()
             show_app_dialog(self, "File import complete", f"{len(domains)} new domain{'s' if len(domains) != 1 else ''} imported from:\n{path.name}", "success")
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
             show_app_dialog(self, "Import failed", str(error), "error")
 
     def remove_selected(self):
+        if not self.require_profile_password("remove domains"):
+            return
         selected = self.listbox.curselection()
         if not selected:
             show_app_dialog(self, "No domains selected", "Select one or more domains first.", "warning")
@@ -1224,14 +1587,16 @@ class BlockerApp(tk.Tk):
         removed = [self.blocklist[index] for index in selected]
         for index in reversed(selected):
             self.blocklist.pop(index)
-        save_rules(self.blocklist, self.categories, self.subdomain_prefixes)
+        self.save_current_rules()
         self.refresh_listbox()
         show_app_dialog(self, "Domains removed", f"{len(removed)} domain{'s' if len(removed) != 1 else ''} removed.", "success")
 
     def clear_all(self):
+        if not self.require_profile_password("clear the blocked list"):
+            return
         if show_app_dialog(self, "Clear blocked domains", "Remove all blocked domains?", "warning", confirm=True):
             self.blocklist.clear()
-            save_rules(self.blocklist, self.categories, self.subdomain_prefixes)
+            self.save_current_rules()
             self.refresh_listbox()
 
     def apply_blocking(self):

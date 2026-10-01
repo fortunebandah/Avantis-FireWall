@@ -1,6 +1,7 @@
 {
   "blocked_domains": [
-    "betting.co.zw"
+    "betting.co.zw",
+    "econet.co.zw"
   ],
   "categories": {
     "adult": [
@@ -91,5 +92,7 @@
     "api",
     "app",
     "play"
-  ]
+  ],
+  "protection_profile": "default",
+  "profile_password": ""
 }
