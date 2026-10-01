@@ -11,7 +11,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import filedialog, ttk
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 from PIL import Image, ImageTk
 from docx import Document
 
@@ -21,6 +20,7 @@ RULES_FILE = Path(__file__).with_name("rules.json")
 ACTIVITY_FILE = Path(__file__).with_name("activity.json")
 LOGO_FILE = Path(__file__).with_name("Images") / "Avantis-logo-prl.png"
 DOMAIN_PATTERN = re.compile(r"(?i)(?:https?://)?(?:www\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}")
+VALID_DOMAIN_PATTERN = re.compile(r"(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 DEFAULT_CATEGORIES = {
     "adult": [
@@ -125,6 +125,11 @@ PUBLIC_LISTS = {
         "description": "Community-maintained hosts list containing ads and known harmful domains.",
     },
 }
+HOSTS_DOMAIN_LIMIT = 1000
+PROTECTED_DOMAINS = {
+    "bing.com", "google.com", "yahoo.com", "duckduckgo.com",
+    "microsoft.com", "windows.com", "live.com", "openai.com", "chatgpt.com",
+}
 
 
 def default_rules():
@@ -183,6 +188,20 @@ def normalize_domain(value: str) -> str:
     if domain.startswith("www."):
         domain = domain[4:]
     return domain.strip(".")
+
+
+def is_valid_domain(domain: str) -> bool:
+    if not domain or len(domain) > 253:
+        return False
+    try:
+        ipaddress.ip_address(domain)
+        return False
+    except ValueError:
+        return bool(VALID_DOMAIN_PATTERN.fullmatch(domain))
+
+
+def is_protected_domain(domain: str) -> bool:
+    return any(domain == protected or domain.endswith(f".{protected}") for protected in PROTECTED_DOMAINS)
 
 
 def keyword_matches(domain: str, keyword: str) -> bool:
@@ -308,7 +327,7 @@ def save_rules(blocklist, categories, subdomain_prefixes=None):
     seen = set()
     for item in blocklist:
         domain = normalize_domain(item)
-        if domain and domain not in seen:
+        if domain and not is_protected_domain(domain) and domain not in seen:
             unique.append(domain)
             seen.add(domain)
 
@@ -370,6 +389,37 @@ def record_activity(event_type, domain, detail):
     save_activity(activity["events"], activity["retention_hours"])
 
 
+def inspect_hosts_rules():
+    if not os.path.exists(WINDOWS_HOSTS_PATH):
+        return "Hosts file check failed: Windows hosts file not found.", "error"
+
+    marker = "# >>> suspicious-site-blocker >>>"
+    end_marker = "# <<< suspicious-site-blocker <<<"
+    try:
+        with open(WINDOWS_HOSTS_PATH, "r", encoding="utf-8") as hosts_file:
+            content = hosts_file.read()
+    except (OSError, UnicodeError) as error:
+        return f"Hosts file check failed: {error}", "error"
+
+    start_index = content.find(marker)
+    end_index = content.find(end_marker, start_index + len(marker)) if start_index >= 0 else -1
+    if start_index < 0 and end_index < 0:
+        return "Hosts file check: No Avantis-managed rules found.", "success"
+    if start_index < 0 or end_index < 0:
+        return "Hosts file check: Incomplete Avantis markers; review the hosts file.", "warning"
+
+    section = content[start_index + len(marker):end_index]
+    hostnames = set()
+    mapping_count = 0
+    for line in section.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and not fields[0].startswith("#"):
+            mapping_count += 1
+            hostnames.update(hostname.lower() for hostname in fields[1:])
+
+    return f"Hosts file check: {len(hostnames)} Avantis hostnames in {mapping_count} mappings.", "warning"
+
+
 def write_hosts_file(blocklist, subdomain_prefixes=None):
     if not os.path.exists(WINDOWS_HOSTS_PATH):
         raise FileNotFoundError("Windows hosts file not found.")
@@ -377,8 +427,8 @@ def write_hosts_file(blocklist, subdomain_prefixes=None):
     try:
         with open(WINDOWS_HOSTS_PATH, "r", encoding="utf-8") as f:
             content = f.read()
-    except PermissionError:
-        raise PermissionError("Administrator rights are required to change the hosts file.")
+    except PermissionError as error:
+           raise PermissionError(f"Windows denied read access to the hosts file: {error}. This can indicate file permissions or security software, not only missing administrator rights.") from error
 
     marker = "# >>> suspicious-site-blocker >>>"
     end_marker = "# <<< suspicious-site-blocker <<<"
@@ -390,9 +440,10 @@ def write_hosts_file(blocklist, subdomain_prefixes=None):
 
     lines = []
     prefixes = subdomain_prefixes or DEFAULT_SUBDOMAIN_PREFIXES
+    protected_hosts = PROTECTED_HOSTS | PROTECTED_DOMAINS
     for domain in blocklist:
         clean = normalize_domain(domain)
-        if clean and not any(clean == protected or clean.endswith(f".{protected}") for protected in PROTECTED_HOSTS):
+        if clean and not any(clean == protected or clean.endswith(f".{protected}") for protected in protected_hosts):
             hostnames = [clean] + [f"{prefix}.{clean}" for prefix in prefixes]
             for hostname in hostnames:
                 lines.append(f"127.0.0.1 {hostname}")
@@ -404,15 +455,10 @@ def write_hosts_file(blocklist, subdomain_prefixes=None):
     try:
         if not HOSTS_BACKUP_PATH.exists():
             shutil.copy2(WINDOWS_HOSTS_PATH, HOSTS_BACKUP_PATH)
-        temporary_path = f"{WINDOWS_HOSTS_PATH}.avantis.tmp"
-        with open(temporary_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(new_content)
-        os.replace(temporary_path, WINDOWS_HOSTS_PATH)
-    except PermissionError:
-        raise PermissionError("Administrator rights are required to change the hosts file.")
-    finally:
-        if os.path.exists(f"{WINDOWS_HOSTS_PATH}.avantis.tmp"):
-            os.remove(f"{WINDOWS_HOSTS_PATH}.avantis.tmp")
+    except PermissionError as error:
+        raise PermissionError(f"Windows denied the hosts-file backup at {HOSTS_BACKUP_PATH}: {error}") from error
+
+    replace_windows_hosts_file(WINDOWS_HOSTS_PATH, new_content)
 
 
 def remove_hosts_rules():
@@ -424,8 +470,8 @@ def remove_hosts_rules():
     try:
         with open(WINDOWS_HOSTS_PATH, "r", encoding="utf-8") as f:
             content = f.read()
-    except PermissionError:
-        raise PermissionError("Administrator rights are required to change the hosts file.")
+    except PermissionError as error:
+           raise PermissionError(f"Windows denied read access to the hosts file: {error}. This can indicate file permissions or security software, not only missing administrator rights.") from error
 
     if marker not in content or end_marker not in content:
         return False
@@ -433,29 +479,34 @@ def remove_hosts_rules():
     start_index = content.index(marker)
     end_index = content.index(end_marker) + len(end_marker)
     new_content = content[:start_index].rstrip() + content[end_index:].lstrip()
-    try:
-        temporary_path = f"{WINDOWS_HOSTS_PATH}.avantis.tmp"
-        with open(temporary_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(new_content)
-        os.replace(temporary_path, WINDOWS_HOSTS_PATH)
-    except PermissionError:
-        raise PermissionError("Administrator rights are required to change the hosts file.")
-    finally:
-        if os.path.exists(f"{WINDOWS_HOSTS_PATH}.avantis.tmp"):
-            os.remove(f"{WINDOWS_HOSTS_PATH}.avantis.tmp")
+    replace_windows_hosts_file(WINDOWS_HOSTS_PATH, new_content)
     return True
 
 
 def flush_dns_cache():
-    subprocess.run(["ipconfig", "/flushdns"], capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(["ipconfig", "/flushdns"], capture_output=True, text=True, check=False)
+    except OSError as error:
+        return False, str(error)
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return False, detail or f"ipconfig exited with status {result.returncode}"
+    return True, ""
 
 
 def is_admin():
+    if os.name == "nt":
+        import ctypes
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except (AttributeError, OSError):
+            return False
+
     try:
         return os.getuid() == 0
     except AttributeError:
-        import ctypes
-        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        return False
 
 
 def relaunch_as_admin():
@@ -463,35 +514,47 @@ def relaunch_as_admin():
         return False
 
     import ctypes
-    script_path = os.path.abspath(__file__)
+    script_path = str(Path(__file__).resolve())
     parameters = subprocess.list2cmdline([script_path])
     result = ctypes.windll.shell32.ShellExecuteW(
         None,
         "runas",
-        sys.executable,
+        str(Path(sys.executable).resolve()),
         parameters,
-        str(Path(__file__).parent),
+        str(Path(__file__).resolve().parent),
         1,
     )
     return result > 32
 
 
-def add_to_startup():
-    startup_dir = os.path.join(os.environ["APPDATA"], "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
-    os.makedirs(startup_dir, exist_ok=True)
+def replace_windows_hosts_file(target_path: str, new_content: str):
+    temp_path = f"{target_path}.avantis.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(new_content)
+    except PermissionError as error:
+        raise PermissionError(f"Windows denied writing the temporary hosts file at {temp_path}: {error}") from error
 
-    shortcut_path = os.path.join(startup_dir, "AvantisFireWall.bat")
-    script_path = os.path.abspath(__file__)
+    try:
+        try:
+            os.replace(temp_path, target_path)
+            return
+        except PermissionError:
+            pass
 
-    bat_content = (
-        "@echo off\n"
-        "start /B python \"" + script_path + "\"\n"
-    )
+        import ctypes
+        if os.name == "nt":
+            kernel32 = ctypes.windll.kernel32
+            if kernel32.MoveFileExW(temp_path, target_path, 0x1):
+                return
 
-    with open(shortcut_path, "w", encoding="utf-8") as f:
-        f.write(bat_content)
-
-    return shortcut_path
+        raise PermissionError(f"Windows denied replacing the hosts file at {target_path}. Check file permissions or security software that may be locking the file.")
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
 
 
 def show_app_dialog(parent, title, message, kind="info", confirm=False):
@@ -582,6 +645,7 @@ class BlockerApp(tk.Tk):
         self.subdomain_prefixes = config["subdomain_prefixes"]
         self.create_widgets()
         self.refresh_listbox()
+        self.refresh_hosts_status()
 
     def create_widgets(self):
         header = ttk.Frame(self, style="Header.TFrame", padding=(26, 20))
@@ -651,7 +715,10 @@ class BlockerApp(tk.Tk):
         host_buttons.pack(fill="x")
         ttk.Button(host_buttons, text="Apply to Hosts", command=self.apply_blocking, style="Accent.TButton").pack(side="left", padx=(0, 8))
         ttk.Button(host_buttons, text="Remove Hosts Rules", command=self.remove_blocking, style="Secondary.TButton").pack(side="left", padx=(0, 8))
-        ttk.Button(host_buttons, text="Run on Startup", command=self.run_on_startup, style="Secondary.TButton").pack(side="left")
+        ttk.Button(host_buttons, text="Export DNS Feed", command=self.export_dns_feed, style="Secondary.TButton").pack(side="left", padx=(0, 8))
+        ttk.Button(host_buttons, text="Check Hosts File", command=self.refresh_hosts_status, style="Secondary.TButton").pack(side="left")
+        self.hosts_status_label = ttk.Label(host_frame, text="Hosts file check not run.", style="Muted.TLabel", wraplength=800)
+        self.hosts_status_label.pack(anchor="w", pady=(10, 0))
 
         overview = ttk.Frame(protect_tab, style="App.TFrame")
         overview.pack(fill="both", expand=True, pady=(12, 0))
@@ -695,7 +762,6 @@ class BlockerApp(tk.Tk):
         bulk_actions.pack(side="left", padx=(12, 0), anchor="n")
         ttk.Button(bulk_actions, text="Add All", command=self.add_multiple, style="Accent.TButton").pack(fill="x")
         ttk.Button(bulk_actions, text="Import File", command=self.import_file, style="Secondary.TButton").pack(fill="x", pady=(8, 0))
-        ttk.Button(bulk_actions, text="Public List", command=self.open_public_list, style="Secondary.TButton").pack(fill="x", pady=(8, 0))
 
         def resize_bulk_input(_event=None):
             if not self.bulk_text.edit_modified():
@@ -705,7 +771,7 @@ class BlockerApp(tk.Tk):
             self.bulk_text.edit_modified(False)
 
         self.bulk_text.bind("<<Modified>>", resize_bulk_input)
-        ttk.Label(bulk_frame, text="Public sources are imported for review only. Hosts rules change only after an explicit Apply.", style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
+        ttk.Label(bulk_frame, text="Imported domains are saved locally. Hosts rules change only after an explicit Apply.", style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
 
         list_frame = ttk.Frame(domains_tab, style="Panel.TFrame", padding=18)
         list_frame.pack(fill="both", expand=True)
@@ -765,12 +831,16 @@ class BlockerApp(tk.Tk):
         if hasattr(self, "rule_stat_label"):
             self.rule_stat_label.config(text=str(sum(len(words) for words in self.categories.values())))
 
+    def refresh_hosts_status(self):
+        status, state = inspect_hosts_rules()
+        self.hosts_status_label.config(text=status, style="Muted.TLabel" if state == "success" else "App.TLabel")
+
     def parse_domains(self, value, limit=None):
         domains = []
         seen = set(self.blocklist)
         for item in re.split(r"[\s,;]+", value):
             domain = normalize_domain(item)
-            if domain and domain not in seen:
+            if is_valid_domain(domain) and not is_protected_domain(domain) and domain not in seen:
                 domains.append(domain)
                 seen.add(domain)
                 if limit and len(domains) >= limit:
@@ -778,7 +848,12 @@ class BlockerApp(tk.Tk):
         return domains
 
     def extract_domains(self, text, limit=None):
-        return self.parse_domains(" ".join(DOMAIN_PATTERN.findall(text)), limit=limit)
+        candidates = []
+        for line in text.splitlines():
+            content = line.split("#", 1)[0].strip()
+            if content:
+                candidates.extend(re.split(r"[\s,;]+", content))
+        return self.parse_domains(" ".join(candidates), limit=limit)
 
     def check_url(self):
         site = self.check_var.get().strip()
@@ -830,11 +905,11 @@ class BlockerApp(tk.Tk):
         header = tk.Frame(dialog, bg="#0b6478", padx=22, pady=16)
         header.pack(fill="x")
         tk.Label(header, text="Safety Center", bg="#0b6478", fg="#ffffff", font=("Segoe UI", 17, "bold")).pack(anchor="w")
-        tk.Label(header, text="Local blocked-visit and manual-check activity", bg="#0b6478", fg="#e2f5f7", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 0))
+        tk.Label(header, text="Local manual-check activity", bg="#0b6478", fg="#e2f5f7", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 0))
 
         body = ttk.Frame(dialog, style="App.TFrame", padding=16)
         body.pack(fill="both", expand=True)
-        ttk.Label(body, text="Only blocked extension events and manual checks are recorded. Successful browsing is not logged.", style="Muted.TLabel", wraplength=700).pack(anchor="w", pady=(0, 12))
+        ttk.Label(body, text="Only manual checks are recorded. Successful browsing is not logged.", style="Muted.TLabel", wraplength=700).pack(anchor="w", pady=(0, 12))
 
         settings = ttk.Frame(body, style="Panel.TFrame", padding=10)
         settings.pack(fill="x", pady=(0, 10))
@@ -1100,62 +1175,6 @@ class BlockerApp(tk.Tk):
         self.bulk_text.delete("1.0", tk.END)
         show_app_dialog(self, "Bulk import complete", f"{len(domains)} domain{'s' if len(domains) != 1 else ''} added to the block list.", "success")
 
-    def open_public_list(self):
-        dialog = tk.Toplevel(self)
-        dialog.title("Download a public domain list")
-        dialog.geometry("640x360")
-        dialog.minsize(560, 320)
-        dialog.configure(bg="#eaf4f7")
-        dialog.transient(self)
-        if hasattr(self, "window_icon"):
-            dialog.iconphoto(True, self.window_icon)
-
-        header = tk.Frame(dialog, bg="#0b6478", padx=22, pady=16)
-        header.pack(fill="x")
-        tk.Label(header, text="Public domain lists", bg="#0b6478", fg="#ffffff", font=("Segoe UI", 17, "bold")).pack(anchor="w")
-        tk.Label(header, text="Download known defensive lists for review before blocking", bg="#0b6478", fg="#e2f5f7", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 0))
-
-        body = ttk.Frame(dialog, style="App.TFrame", padding=16)
-        body.pack(fill="both", expand=True)
-        list_var = tk.StringVar(value=next(iter(PUBLIC_LISTS)))
-        list_menu = ttk.Combobox(body, textvariable=list_var, values=list(PUBLIC_LISTS), state="readonly")
-        list_menu.pack(fill="x")
-        description = ttk.Label(body, text="", style="Muted.TLabel", wraplength=580)
-        description.pack(anchor="w", pady=(8, 0))
-        status = ttk.Label(body, text="", style="Muted.TLabel", wraplength=580)
-        status.pack(anchor="w", pady=(12, 0))
-
-        def update_description(_event=None):
-            description.config(text=PUBLIC_LISTS[list_var.get()]["description"])
-
-        def download_list():
-            source = PUBLIC_LISTS[list_var.get()]
-            status.config(text="Downloading list...")
-            dialog.update_idletasks()
-            try:
-                request = Request(source["url"], headers={"User-Agent": "Avantis-FireWall/1.0"})
-                with urlopen(request, timeout=20) as response:
-                    content = response.read(8 * 1024 * 1024 + 1)
-                if len(content) > 8 * 1024 * 1024:
-                    raise ValueError("The public list is larger than the 8 MB safety limit.")
-                domains = self.extract_domains(content.decode("utf-8", errors="ignore"), limit=PUBLIC_LIST_LIMIT)
-                if not domains:
-                    raise ValueError("No recognizable domains were found in that list.")
-                self.blocklist.extend(domains)
-                save_rules(self.blocklist, self.categories, self.subdomain_prefixes)
-                self.refresh_listbox()
-                status.config(text=f"Found {len(domains)} new domains. Review the list, then click Apply to Hosts when ready.")
-            except (OSError, ValueError) as error:
-                status.config(text=f"Download failed: {error}")
-
-        list_menu.bind("<<ComboboxSelected>>", update_description)
-        update_description()
-        ttk.Button(body, text="Download and Add", command=download_list, style="Accent.TButton").pack(anchor="w", pady=(18, 0))
-        ttk.Button(body, text="Close", command=dialog.destroy, style="Secondary.TButton").pack(anchor="e", pady=(10, 0))
-        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
-        dialog.grab_set()
-        self.wait_window(dialog)
-
     def import_file(self):
         file_path = filedialog.askopenfilename(
             parent=self,
@@ -1216,6 +1235,10 @@ class BlockerApp(tk.Tk):
             self.refresh_listbox()
 
     def apply_blocking(self):
+        if len(self.blocklist) > HOSTS_DOMAIN_LIMIT:
+            show_app_dialog(self, "Hosts list is too large", f"This list contains {len(self.blocklist)} domains. Windows hosts mode is limited to {HOSTS_DOMAIN_LIMIT} domains in Avantis to avoid slow DNS and security-tool locks. Use Export DNS Feed for enterprise-scale filtering.", "warning")
+            return
+
         if not is_admin():
             if relaunch_as_admin():
                 self.destroy()
@@ -1225,10 +1248,33 @@ class BlockerApp(tk.Tk):
 
         try:
             write_hosts_file(self.blocklist, self.subdomain_prefixes)
-            flush_dns_cache()
-            show_app_dialog(self, "Protection applied", "The configured domains and common subdomains were added to the Windows hosts file.\n\nIf a browser still opens a site, disable Secure DNS / DNS-over-HTTPS in that browser and restart it.", "success")
+            self.refresh_hosts_status()
+            flushed, flush_error = flush_dns_cache()
+            message = "The configured domains and common subdomains were added to the Windows hosts file."
+            if not flushed:
+                message += f"\n\nWindows could not flush its DNS cache: {flush_error}\nClose and reopen Edge to clear its own cached lookups."
+            show_app_dialog(self, "Protection applied", message, "success" if flushed else "warning")
         except Exception as e:
+            self.refresh_hosts_status()
             show_app_dialog(self, "Could not apply protection", str(e), "error")
+
+    def export_dns_feed(self):
+        file_path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Export enterprise DNS blocklist",
+            defaultextension=".txt",
+            filetypes=[("DNS domain list", "*.txt"), ("All files", "*.*")],
+            initialfile="avantis-dns-blocklist.txt",
+        )
+        if not file_path:
+            return
+
+        domains = sorted({domain for domain in self.blocklist if not is_protected_domain(domain)})
+        try:
+            Path(file_path).write_text("\n".join(domains) + "\n", encoding="utf-8")
+            show_app_dialog(self, "DNS feed exported", f"Exported {len(domains)} domains. Import this file into your managed DNS, filtering gateway, or enterprise policy system.", "success")
+        except OSError as error:
+            show_app_dialog(self, "Could not export DNS feed", str(error), "error")
 
     def remove_blocking(self):
         if not is_admin():
@@ -1243,19 +1289,15 @@ class BlockerApp(tk.Tk):
 
         try:
             removed = remove_hosts_rules()
-            flush_dns_cache()
+            self.refresh_hosts_status()
+            flushed, flush_error = flush_dns_cache()
             message = "The Avantis FireWall hosts rules were removed." if removed else "No Avantis FireWall hosts rules were found."
-            show_app_dialog(self, "Hosts rules removed", message, "success")
+            if not flushed:
+                message += f"\n\nWindows could not flush its DNS cache: {flush_error}\nThe hosts-file change succeeded; close and reopen Edge to clear its own cached lookups."
+            show_app_dialog(self, "Hosts rules removed" if removed else "Hosts rules checked", message, "success" if flushed else "warning")
         except Exception as e:
+            self.refresh_hosts_status()
             show_app_dialog(self, "Could not remove hosts rules", str(e), "error")
-
-    def run_on_startup(self):
-        try:
-            shortcut = add_to_startup()
-            show_app_dialog(self, "Startup enabled", f"Avantis FireWall was added to Windows startup:\n{shortcut}", "success")
-        except Exception as e:
-            show_app_dialog(self, "Could not enable startup", str(e), "error")
-
 
 def main():
     if os.name == "nt" and not is_admin():

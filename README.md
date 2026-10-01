@@ -9,7 +9,6 @@ Avantis FireWall is a simple Windows desktop app that blocks suspicious websites
 - Includes a searchable site and word dictionary for blocked domains, detection keywords, and subdomain prefixes
 - Detects suspicious keywords like `porn`, `casino`, `betting`, `adult`, `xxx`, `roulette`, etc.
 - Adds the blocked domains to the Windows hosts file so they resolve to `127.0.0.1`
-- Lets you install the app to Windows startup so it runs automatically when you log in
 - Saves your custom block list and detection keywords in `rules.json`
 
 ## Run the app
@@ -24,7 +23,9 @@ python app.py
 
 3. If Windows blocks access to the hosts file, run the app as Administrator.
 
-The app is organized into four tabs: **Protect** for risk analysis and hosts controls, **Import** for bulk and public lists, **Domains** for reviewing the active blocklist, and **Insights** for the Safety Center, dictionary, and rule editor.
+The app is organized into four tabs: **Protect** for risk analysis and hosts controls, **Import** for manually pasted or file-based domains, **Domains** for reviewing the active blocklist, and **Insights** for the Safety Center, dictionary, and rule editor.
+
+For enterprise-scale lists, use **Protect → Export DNS Feed**. It creates a clean one-domain-per-line file for a managed DNS service, filtering gateway, or device policy system. Avantis limits Windows hosts application to 1,000 domains because each domain expands into multiple hostnames and sinkhole entries; large feeds belong in managed DNS infrastructure.
 
 ## Important
 
@@ -60,24 +61,19 @@ Windows hosts files do not support wildcard rules. To cover common subdomains, t
 
 Use the **Bulk import** box in the app. Paste domains separated by new lines, commas, semicolons, or spaces, then click **Add All**. Click **Import File** to scan `.txt`, `.csv`, `.json`, or `.docx` files for domain names. Duplicate domains already in the list are ignored automatically. Hold `Ctrl` while selecting domains in the list to remove several at once with **Remove Selected**.
 
-Use **Public List** to download a defensive domain list from URLhaus or the StevenBlack hosts project. The app limits downloads to 8 MB and imports at most 5,000 new domains. Downloaded domains are added for review only; they are not written to the hosts file until you explicitly click **Apply to Hosts**. Public lists change over time and can contain false positives, so review them before applying them on a work computer.
-
 ## Browser-independent protection
 
-The main Avantis app does not depend on Chrome or any browser extension. **Apply to Hosts** blocks configured domains and common subdomains in Chrome, Edge, Firefox, and other browsers. For category-level protection and SafeSearch across many laptops, use managed DNS through the router, DHCP, Windows policy, or device management.
+The desktop app uses Windows hosts-file rules for cross-browser domain blocking. **Apply to Hosts** blocks configured domains and common subdomains in Chrome, Edge, Firefox, and other browsers. For category-level protection and SafeSearch across many laptops, use managed DNS through the router, DHCP, Windows policy, or device management.
 
 Hosts protection cannot read encrypted search words such as `betting` or `casino`. Exact search-keyword filtering requires a managed DNS/SafeSearch service or a managed browser/device policy. Read [WORKPLACE_DEPLOYMENT.md](WORKPLACE_DEPLOYMENT.md) for the browser-independent deployment model.
 
 Use **Check URL** for a local explainable analysis. The result includes a score, matched categories, smart signals, and a recommendation. No domain lookup or external AI service is used, so the analysis stays on the computer.
 
-The `browser-extension` folder is optional compatibility code for organizations that deliberately choose browser-level filtering. It is not installed, required, or synchronized by the desktop app.
-
 The browser-independent hosts layer now creates a one-time `hosts.avantis.backup`, uses an atomic update, and includes **Remove Hosts Rules**. It blocks configured domains across browsers without reading search queries; keyword-level search blocking still requires managed DNS/SafeSearch or browser policy.
 
 ## Privacy-friendly safety center
 
-The desktop **Safety Center** records manual checks only. It does not depend on a browser and does not record successful browsing. Desktop records are stored locally in `activity.json` with 1-hour, 24-hour, and 7-day retention choices plus a clear action. Optional extension records remain separate in browser storage. These activity files are excluded from Git by `.gitignore`.
+The desktop **Safety Center** records manual checks only and does not record successful browsing. Records are stored locally in `activity.json` with 1-hour, 24-hour, and 7-day retention choices plus a clear action. These activity files are excluded from Git by `.gitignore`.
 
-## Startup option
+Previously imported public-list domains remain in `rules.json` after public-list downloading is disabled; remove them from the Domains tab if you no longer want them in the local list.
 
-The app includes a button to add itself to the Windows startup folder so it launches automatically.
