@@ -8,10 +8,10 @@ import {
 } from 'lucide-react'
 
 const pages = [
-  { id: 'protect', label: 'Protection', icon: ShieldCheck },
-  { id: 'import', label: 'Import domains', icon: Upload },
-  { id: 'domains', label: 'Blocked domains', icon: Globe2 },
-  { id: 'insights', label: 'Insights & rules', icon: Activity },
+  { id: 'protect', label: 'Protection' },
+  { id: 'import', label: 'Import domains' },
+  { id: 'domains', label: 'Blocked domains' },
+  { id: 'insights', label: 'Insights & rules' },
 ]
 
 const retentionOptions = [
@@ -77,6 +77,16 @@ function App() {
   }, [toast])
 
   const safeMode = state?.protection_profile === 'child_protection'
+  const hostsStatusMessage = state?.hosts_status?.[0] || ''
+  const hostsStatusLevel = state?.hosts_status?.[1] || 'warning'
+  const hostsActive = /\d+ Avantis hostnames in \d+ mappings\./.test(hostsStatusMessage)
+  const hostsStatusLabel = hostsActive
+    ? 'Hosts protection active'
+    : hostsStatusLevel === 'error'
+      ? 'Hosts file unavailable'
+      : hostsStatusMessage.includes('Incomplete Avantis markers')
+        ? 'Hosts file needs review'
+        : 'Hosts rules not applied'
   const hiddenPages = safeMode ? pages.filter((item) => item.id === 'protect') : pages
   const shownDomains = (state?.blocked_domains || []).filter((domain) => domain.includes(domainQuery.trim().toLowerCase()))
 
@@ -359,28 +369,25 @@ function App() {
           <img className="brand-logo" src={logo} alt="Avantis, Product of Zimbabwe" />
           <span className="brand-product">FIREWALL</span>
         </div>
-        <div className="side-caption">WORKSPACE</div>
         <nav className="primary-nav" aria-label="Main navigation">
-          {hiddenPages.map(({ id, label, icon: Icon }) => (
+          {hiddenPages.map(({ id, label }) => (
             <button key={id} className={`nav-link ${page === id ? 'active' : ''}`} onClick={() => setPage(id)}>
-              <Icon size={17} strokeWidth={1.9} /><span>{label}</span>{page === id && <span className="nav-indicator" />}
+              <span>{label}</span>
             </button>
           ))}
         </nav>
         <div className="sidebar-bottom">
           <div className={`mode-chip ${safeMode ? 'safe' : ''}`}>
-            <span className="mode-dot" />
-            <div><strong>{safeMode ? 'Safe Mode' : 'Admin mode'}</strong><span>{safeMode ? 'Editing restricted' : 'Rules editable'}</span></div>
+            <div><strong>{safeMode ? 'Safe Mode' : 'Admin mode'}</strong></div>
           </div>
-          <div className="local-note"><Fingerprint size={15} /> Local only · no browsing telemetry</div>
         </div>
       </aside>
 
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumbs"><span>AVANTIS</span><span className="crumb-slash">/</span><strong>{pages.find((item) => item.id === page)?.label}</strong></div>
+          <div className="breadcrumbs"><strong>{pages.find((item) => item.id === page)?.label}</strong></div>
           <div className="top-actions">
-            <span className="connection"><i /> Protected locally</span>
+            <span className={`connection ${hostsActive ? 'active' : hostsStatusLevel === 'error' ? 'error' : 'idle'}`}>{hostsStatusLabel}</span>
             {safeMode ? (
               <button className="button button-quiet" onClick={openAdminAccess}><KeyRound size={15} /> Admin access</button>
             ) : (
@@ -393,11 +400,9 @@ function App() {
           {page === 'protect' && (
             <>
               <div className="page-heading">
-                <div><div className="eyebrow">CONTROL CENTER <span>•</span> {safeMode ? 'SAFE MODE' : 'ADMIN MODE'}</div><h1>Protection overview</h1><p>Review local defenses and check a destination before visiting.</p></div>
+                <div><h1>Protection</h1><p>Check a site or review your block list.</p></div>
                 <div className={`profile-select ${safeMode ? 'safe' : ''}`}>
-                  <span className="profile-icon">{safeMode ? <LockKeyhole size={17} /> : <ShieldCheck size={17} />}</span>
-                  <div><small>ACTIVE PROFILE</small><strong>{safeMode ? 'Safe Mode' : 'Admin'}</strong></div>
-                  <ChevronDown size={15} />
+                  <div><strong>{safeMode ? 'Safe Mode' : 'Admin'}</strong></div>
                   <select aria-label="Protection profile" value={state.protection_profile} onChange={(event) => changeProfile(event.target.value)}>
                     <option value="default">Admin</option><option value="child_protection">Safe Mode</option>
                   </select>
@@ -405,37 +410,37 @@ function App() {
               </div>
 
               <section className="stats-row" aria-label="Protection statistics">
-                <Stat icon={Globe2} label="Blocked domains" value={state.blocked_domains.length} note="Local rule list" tone="mint" />
-                <Stat icon={ListFilter} label="Detection rules" value={Object.values(state.categories).reduce((sum, words) => sum + words.length, 0)} note="Across all categories" tone="amber" />
-                <Stat icon={Activity} label="Manual checks" value={state.activity.events.length} note="Stored on this device" tone="blue" />
+                <Stat label="Blocked domains" value={state.blocked_domains.length} />
+                <Stat label="Detection rules" value={Object.values(state.categories).reduce((sum, words) => sum + words.length, 0)} />
+                <Stat label="Manual checks" value={state.activity.events.length} />
               </section>
 
               <div className="protect-grid">
                 <section className="surface analysis-panel">
-                  <div className="section-heading"><div><div className="eyebrow">LOCAL RISK CHECK</div><h2>Analyze a website</h2></div><div className="heading-icon"><Gauge size={19} /></div></div>
-                  <p className="section-copy">Check a URL against your block list, DNS feed, and local risk signals.</p>
+                  <div className="section-heading"><div><h2>Check a website</h2></div></div>
+                  <p className="section-copy">Check a site against your block list and device rules.</p>
                   <form className="analyze-form" onSubmit={(event) => { event.preventDefault(); analyze() }}>
                     <div className="input-wrap"><Search size={17} /><input value={analysisInput} onChange={(event) => setAnalysisInput(event.target.value)} placeholder="example.com or https://example.com" aria-label="Website or domain" /></div>
-                    <button className="button button-primary" disabled={busy}>Analyze <ArrowRight size={16} /></button>
+                    <button className="button button-primary" disabled={busy}>Check site</button>
                   </form>
-                  {analysis ? <AnalysisResult result={analysis} /> : <div className="signal-note"><Fingerprint size={16} /><span>Analysis runs on this computer. No lookup is sent to a remote service.</span></div>}
+                  {analysis ? <AnalysisResult result={analysis} /> : <div className="signal-note"><span>Checks run on this device. No domain lookup is sent to Avantis.</span></div>}
                 </section>
 
                 {!safeMode && <section className="surface quick-add">
-                  <div className="section-heading"><div><div className="eyebrow">RULE MANAGEMENT</div><h2>Add a domain</h2></div><div className="heading-icon ochre"><Plus size={19} /></div></div>
-                  <p className="section-copy">Add a site to the local block list. Changes apply to Windows only when you choose Apply.</p>
+                  <div className="section-heading"><div><h2>Block a domain</h2></div></div>
+                  <p className="section-copy">It will be blocked in Windows after you select Apply to Hosts.</p>
                   <form className="stack-form" onSubmit={(event) => { event.preventDefault(); addDomains(addInput, () => setAddInput('')) }}>
                     <input value={addInput} onChange={(event) => setAddInput(event.target.value)} placeholder="domain.com" aria-label="Domain to block" />
                     <button className="button button-primary" disabled={busy}><Plus size={16} /> Add domain</button>
                   </form>
-                  <div className="micro-note"><Shield size={14} /> Protected system domains are excluded automatically.</div>
+                  <div className="micro-note">System domains are excluded automatically.</div>
                 </section>}
               </div>
 
               {!safeMode && <section className="surface hosts-panel">
-                <div className="section-heading hosts-heading"><div><div className="eyebrow">WINDOWS HOSTS</div><h2>Protection controls</h2></div><StatusPill status={state.hosts_status} /></div>
+                <div className="section-heading hosts-heading"><div><h2>Block sites on this PC</h2></div><StatusPill status={state.hosts_status} /></div>
                 <div className="hosts-controls">
-                  <div className="hosts-explainer"><strong>Device-wide domain blocking</strong><span>Apply or remove only Avantis-managed entries. Windows administrator permission is required.</span></div>
+                  <div className="hosts-explainer"><strong>Windows block list</strong><span>Only Avantis entries are changed. Administrator permission is required.</span></div>
                   <div className="button-row">
                     <button className="button button-outline" onClick={() => refreshState().then(() => setToast({ type: 'success', message: 'Hosts file status refreshed.' })).catch(showError)} disabled={busy}><Activity size={15} /> Check status</button>
                     <button className="button button-primary" onClick={applyHosts} disabled={busy}><ShieldCheck size={16} /> Apply to Hosts</button>
@@ -444,14 +449,14 @@ function App() {
                   </div>
                 </div>
               </section>}
-              {safeMode && <section className="safe-banner"><LockKeyhole size={19} /><div><strong>Safe Mode is active</strong><span>Editing, imports, and hosts controls are hidden until an admin unlocks this profile.</span></div><button onClick={openAdminAccess}>Admin access <ArrowRight size={15} /></button></section>}
+              {safeMode && <section className="safe-banner"><div><strong>Safe Mode is active</strong><span>An admin must unlock this profile to edit settings or change Windows protection.</span></div><button onClick={openAdminAccess}>Admin access</button></section>}
             </>
           )}
 
           {page === 'import' && <>
             <PageTitle eyebrow="BULK MANAGEMENT" title="Import domains" description="Bring a list into your local rules. Existing domains and protected system domains are skipped." />
             <section className="surface import-surface">
-              <div className="section-heading"><div><div className="eyebrow">PASTE A LIST</div><h2>Bulk import</h2></div><div className="heading-icon"><FileUp size={19} /></div></div>
+              <div className="section-heading"><div><h2>Bulk import</h2></div></div>
               <p className="section-copy">Separate domains with new lines, commas, semicolons, or spaces.</p>
               <textarea value={bulkInput} onChange={(event) => setBulkInput(event.target.value)} placeholder={'example.com\nsubdomain.example.net'} aria-label="Domains to import" />
               <div className="import-footer"><span>{bulkInput.trim() ? bulkInput.trim().split(/[\s,;]+/).filter(Boolean).length : 0} entries detected</span><div className="button-row"><button className="button button-outline" onClick={importFile} disabled={busy}><Upload size={15} /> Import file</button><button className="button button-primary" disabled={busy || !bulkInput.trim()} onClick={() => addDomains(bulkInput, () => setBulkInput(''))}><Plus size={16} /> Add all</button></div></div>
@@ -477,18 +482,18 @@ function App() {
               {[['activity', 'Activity', Activity], ['dictionary', 'Dictionary', Search], ['rules', 'Rule library', ListFilter]].map(([id, label, Icon]) => <button key={id} className={insightTab === id ? 'selected' : ''} role="tab" aria-selected={insightTab === id} onClick={() => setInsightTab(id)}><Icon size={15} />{label}</button>)}
             </div>
             {insightTab === 'activity' && <section className="surface insights-surface">
-              <div className="list-toolbar"><div><div className="eyebrow">MANUAL CHECKS ONLY</div><h2>Safety Center</h2></div><label className="retention-select"><Clock3 size={15} /><span>Keep for</span><select value={state.activity.retention_hours} onChange={(event) => changeRetention(Number(event.target.value))}>{retentionOptions.map((option) => <option key={option.hours} value={option.hours}>{option.label}</option>)}</select></label></div>
+              <div className="list-toolbar"><div><h2>Activity</h2></div><label className="retention-select"><span>Keep for</span><select value={state.activity.retention_hours} onChange={(event) => changeRetention(Number(event.target.value))}>{retentionOptions.map((option) => <option key={option.hours} value={option.hours}>{option.label}</option>)}</select></label></div>
               <p className="section-copy">Successful browsing is not logged. Records stay in the local activity file and expire automatically.</p>
               <div className="activity-list">{[...state.activity.events].reverse().map((event, index) => <div className="activity-item" key={`${event.timestamp}-${index}`}><div className="activity-icon"><Search size={15} /></div><div className="activity-main"><strong>{event.domain}</strong><span>{event.detail}</span></div><time>{new Date(event.timestamp).toLocaleString()}</time></div>)}{!state.activity.events.length && <div className="empty-state"><Activity size={22} /><strong>No manual checks yet</strong><span>Results from Analyze a website will appear here.</span></div>}</div>
               <div className="table-foot"><span>{state.activity.events.length} record{state.activity.events.length === 1 ? '' : 's'} stored locally</span><button className="text-button danger-text" onClick={clearActivity} disabled={!state.activity.events.length}><Trash2 size={14} /> Clear activity</button></div>
             </section>}
             {insightTab === 'dictionary' && <section className="surface insights-surface">
-              <div className="list-toolbar"><div><div className="eyebrow">SEARCHABLE REFERENCE</div><h2>Site dictionary</h2></div><div className="search-control"><Search size={16} /><input value={dictionaryQuery} onChange={(event) => setDictionaryQuery(event.target.value)} placeholder="Search entries" aria-label="Search dictionary" /></div></div>
+              <div className="list-toolbar"><div><h2>Dictionary</h2></div><div className="search-control"><Search size={16} /><input value={dictionaryQuery} onChange={(event) => setDictionaryQuery(event.target.value)} placeholder="Search entries" aria-label="Search dictionary" /></div></div>
               <div className="dictionary-table-wrap"><table className="domain-table dictionary-table"><thead><tr><th>TYPE</th><th>DOMAIN OR WORD</th><th>CATEGORY</th><th>MEANING</th></tr></thead><tbody>{dictionary.filter((entry) => Object.values(entry).some((value) => String(value).toLowerCase().includes(dictionaryQuery.toLowerCase()))).map((entry, index) => <tr key={`${entry.type}-${entry.entry}-${index}`}><td><span className={`type-tag ${entry.type.toLowerCase()}`}>{entry.type}</span></td><td className="domain-name">{entry.entry}</td><td>{entry.category}</td><td className="meaning-cell">{entry.meaning}</td></tr>)}{!dictionary.length && <tr><td colSpan="4" className="empty-row">No dictionary entries.</td></tr>}</tbody></table></div>
               <div className="table-foot"><span>{dictionary.filter((entry) => Object.values(entry).some((value) => String(value).toLowerCase().includes(dictionaryQuery.toLowerCase()))).length} entries shown</span><span>Reference only; edit terms in Rule library.</span></div>
             </section>}
             {insightTab === 'rules' && <section className="surface insights-surface">
-              <div className="list-toolbar"><div><div className="eyebrow">LOCAL RISK DETECTION</div><h2>Rule library</h2></div><div className="search-control"><Search size={16} /><input value={ruleQuery} onChange={(event) => setRuleQuery(event.target.value)} placeholder="Filter rules" aria-label="Filter rules" /></div></div>
+              <div className="list-toolbar"><div><h2>Rules</h2></div><div className="search-control"><Search size={16} /><input value={ruleQuery} onChange={(event) => setRuleQuery(event.target.value)} placeholder="Filter rules" aria-label="Filter rules" /></div></div>
               <div className="rule-list">{visibleRules.map(([category, keyword]) => { const key = `${category}\u0000${keyword}`; return <label key={key} className="rule-row"><input type="checkbox" checked={selectedRules.some(([itemCategory, itemKeyword]) => itemCategory === category && itemKeyword === keyword)} onChange={(event) => setSelectedRules((current) => event.target.checked ? [...current, [category, keyword]] : current.filter(([itemCategory, itemKeyword]) => itemCategory !== category || itemKeyword !== keyword))} /><span className={`category-dot ${category}`} /><strong>{keyword}</strong><span className="rule-category">{category}</span></label> })}{!visibleRules.length && <div className="empty-row">No rules match this filter.</div>}</div>
               <div className="rule-editor"><label>Category<input value={newCategory} onChange={(event) => setNewCategory(event.target.value)} placeholder="e.g. gambling" /></label><label>Keyword or phrase<input value={newKeyword} onChange={(event) => setNewKeyword(event.target.value)} placeholder="e.g. betting" onKeyDown={(event) => event.key === 'Enter' && addRule()} /></label><button className="button button-primary" onClick={addRule} disabled={busy || !newCategory.trim() || !newKeyword.trim()}><Plus size={15} /> Add rule</button></div>
               <div className="table-foot"><span>{visibleRules.length} rules shown</span><button className="text-button danger-text" onClick={removeRules} disabled={busy || !selectedRules.length}><Trash2 size={14} /> Remove selected{selectedRules.length ? ` (${selectedRules.length})` : ''}</button></div>
@@ -504,18 +509,21 @@ function App() {
   )
 }
 
-function Stat({ icon: Icon, label, value, note, tone }) {
-  return <div className="stat-item"><span className={`stat-icon ${tone}`}><Icon size={17} /></span><div className="stat-copy"><span>{label}</span><strong>{value}</strong><small>{note}</small></div></div>
+function Stat({ label, value }) {
+  return <div className="stat-item"><div className="stat-copy"><span>{label}</span><strong>{value}</strong></div></div>
 }
 
-function PageTitle({ eyebrow, title, description }) {
-  return <div className="page-heading simple"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{description}</p></div></div>
+function PageTitle({ title, description }) {
+  return <div className="page-heading simple"><div><h1>{title}</h1><p>{description}</p></div></div>
 }
 
 function StatusPill({ status }) {
   const [message, level] = status || ['Hosts status unavailable.', 'warning']
-  const active = message.includes('Avantis-managed rules found')
-  return <span className={`status-pill ${level === 'error' ? 'error' : active ? 'active' : 'idle'}`}><i />{active ? 'Rules active' : level === 'error' ? 'Check needed' : 'No rules found'}</span>
+  const active = /\d+ Avantis hostnames in \d+ mappings\./.test(message)
+  const idle = message.includes('No Avantis-managed rules found')
+  const statusClass = level === 'error' ? 'error' : active ? 'active' : idle ? 'idle' : 'warning'
+  const label = active ? 'Rules active' : idle ? 'Not applied' : 'Check needed'
+  return <span className={`status-pill ${statusClass}`}>{label}</span>
 }
 
 function AnalysisResult({ result }) {
@@ -527,7 +535,7 @@ function AnalysisResult({ result }) {
   if (result.keywords?.length) reasons.push(`Matched words: ${result.keywords.join(', ')}`)
   if (result.signals?.length) reasons.push(...result.signals)
   return <div className={`analysis-result ${riskClass}`}>
-    <div className="result-top"><div className="result-domain"><span className="result-icon">{riskClass === 'high' ? <ShieldAlert size={18} /> : riskClass === 'review' ? <AlertTriangle size={18} /> : <ShieldCheck size={18} />}</span><div><small>ANALYSIS RESULT</small><strong>{result.domain || 'Unrecognized domain'}</strong></div></div><div className="risk-score"><strong>{result.score}</strong><span>/ 100</span></div></div>
+    <div className="result-top"><div className="result-domain"><span className="result-icon">{riskClass === 'high' ? <ShieldAlert size={18} /> : riskClass === 'review' ? <AlertTriangle size={18} /> : <ShieldCheck size={18} />}</span><div><strong>{result.domain || 'Unrecognized domain'}</strong></div></div><div className="risk-score"><strong>{result.score}</strong><span>/ 100</span></div></div>
     <div className="score-track"><i style={{ width: `${result.score}%` }} /></div>
     <div className="result-summary"><strong>{result.level}</strong><span>{result.recommendation}</span></div>
     {reasons.length > 0 && <ul className="reason-list">{reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>}

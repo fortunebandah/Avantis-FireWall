@@ -495,3 +495,40 @@ body, .app-shell, .main-area { background: var(--canvas); }
   .page-content { padding: 24px 14px 36px; }
   .page-heading h1 { font-size: 25px; }
 }
+
+svg, .stat-icon, .heading-icon, .profile-icon, .result-icon, .activity-icon, .modal-icon, .loading-mark, .toast-mark,
+.connection i, .status-pill i, .table-status i, .category-dot, .mode-dot, .nav-indicator {
+  display: none !important;
+}
+
+.eyebrow, .side-caption, .profile-select small, .stat-copy small { display: none; }
+.input-wrap, .search-control { gap: 0; }
+.profile-select > div { display: none; }
+.profile-select select {
+  position: static;
+  width: 100%;
+  height: 42px;
+  padding: 0 12px;
+  border: 0;
+  opacity: 1;
+  color: #274b60;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 600;
+}
+.connection.active { color: #26734d; }
+.connection.idle, .connection.warning { color: #946b26; }
+.connection.error { color: #a64a41; }
+.status-pill.active { border-color: #cfe5d4; color: #26734d; background: #f4faf5; }
+.status-pill.idle { color: #71818b; background: #f7f9fa; }
+.status-pill.warning { border-color: #efdfbe; color: #946b26; background: #fffaf0; }
+.status-pill.error { border-color: #efd4cf; color: #a64a41; background: #fff8f7; }
+.status-pill.active i, .status-pill.idle i, .status-pill.warning i { display: none; }
+.domain-table th { font-family: 'Segoe UI', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+.admin-stats small { color: #617e8e; font-family: 'Segoe UI', sans-serif; font-size: 11px; letter-spacing: 0; }
+.icon-button { width: auto; padding: 0 10px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.icon-button.danger::after { content: 'Clear all'; }
+.admin-panel-heading .icon-button::after { content: 'Close'; }
+.toast button { width: auto; padding: 0 8px; font-size: 10px; font-weight: 700; }
+.toast button::after { content: 'Dismiss'; }
+.mode-chip { margin-bottom: 0; }
