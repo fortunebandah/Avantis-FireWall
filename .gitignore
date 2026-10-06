@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 activity.json
+policy-history.json
+admin-audit.json
 hosts.avantis.backup
 web/node_modules/
 web/dist/
+build/
+dist/

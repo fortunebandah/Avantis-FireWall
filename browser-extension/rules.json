@@ -1,0 +1,83 @@
+{
+  "blocked_domains": [
+    "betting.co.zw",
+    "netflix.com",
+    "avantis.co.zw"
+  ],
+  "categories": {
+    "adult": [
+      "adult",
+      "porn",
+      "porno",
+      "pornhub",
+      "sex",
+      "xxx",
+      "xvideos",
+      "nude",
+      "nudity",
+      "strip",
+      "erotic",
+      "playboy",
+      "asian porn",
+      "pornography",
+      "explicit",
+      "xxx video",
+      "sex cam",
+      "cam girl",
+      "escort",
+      "hookup"
+    ],
+    "gambling": [
+      "casino",
+      "gambling",
+      "betting",
+      "roulette",
+      "poker",
+      "slot",
+      "jackpot",
+      "lottery",
+      "sportsbook",
+      "baccarat",
+      "sports betting",
+      "live betting",
+      "virtual betting",
+      "betting tips",
+      "casino online",
+      "aviator",
+      "crash game",
+      "bet slip",
+      "odds",
+      "bookmaker",
+      "bookie",
+      "slot games"
+    ],
+    "malware": [
+      "crack",
+      "keygen",
+      "warez",
+      "nulled",
+      "r57",
+      "download free",
+      "torrent",
+      "serial key",
+      "activator",
+      "pirated",
+      "cheat",
+      "mod apk"
+    ],
+    "scam": [
+      "free money",
+      "bitcoin generator",
+      "lottery winner",
+      "fake rewards",
+      "clickbank scam",
+      "crypto scam",
+      "giveaway",
+      "claim reward",
+      "investment scam",
+      "double your money",
+      "urgent payment",
+      "verify account"
+    ]
+  }
+}

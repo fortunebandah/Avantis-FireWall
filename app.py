@@ -1,4 +1,5 @@
 import json
+import html
 import difflib
 import ipaddress
 import os
@@ -6,19 +7,42 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tkinter as tk
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from tkinter import filedialog, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from urllib.parse import urlparse
 from PIL import Image, ImageTk
 from docx import Document
 
 WINDOWS_HOSTS_PATH = r"C:\Windows\System32\drivers\etc\hosts"
-HOSTS_BACKUP_PATH = Path(__file__).with_name("hosts.avantis.backup")
-RULES_FILE = Path(__file__).with_name("rules.json")
-ACTIVITY_FILE = Path(__file__).with_name("activity.json")
-LOGO_FILE = Path(__file__).with_name("Images") / "Avantis-logo-prl.png"
+APP_ROOT = Path(__file__).resolve().parent
+RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", APP_ROOT))
+LOCAL_APP_DATA = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+AGREEMENT_FILE = LOCAL_APP_DATA / "Avantis FireWall" / "agreement.json"
+AGREEMENT_VERSION = "1.3"
+APP_ICON_FILE = RESOURCE_ROOT / "Images" / "avantis-app.ico"
+if getattr(sys, "frozen", False) and os.name == "nt":
+    PROGRAM_DATA = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
+    LEGACY_DATA_ROOT = PROGRAM_DATA / "Avantis FireWall"
+    DATA_ROOT = LOCAL_APP_DATA / "Avantis FireWall"
+else:
+    LEGACY_DATA_ROOT = None
+    DATA_ROOT = APP_ROOT
+HOSTS_BACKUP_PATH = DATA_ROOT / "hosts.avantis.backup"
+RULES_FILE = DATA_ROOT / "rules.json"
+ACTIVITY_FILE = DATA_ROOT / "activity.json"
+POLICY_HISTORY_FILE = DATA_ROOT / "policy-history.json"
+ADMIN_AUDIT_FILE = DATA_ROOT / "admin-audit.json"
+LOGO_FILE = RESOURCE_ROOT / "Images" / "Avantis-logo-prl.png"
+MIGRATABLE_DATA_FILES = (
+    "rules.json",
+    "activity.json",
+    "policy-history.json",
+    "admin-audit.json",
+    "hosts.avantis.backup",
+)
 DNS_BLOCKLIST_FILENAMES = (
     "avantis-dns-blocklist",
     "avantis-dns-blocklist.txt",
@@ -149,6 +173,18 @@ def default_rules():
     }
 
 
+def initialize_data_root():
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    if LEGACY_DATA_ROOT is None or not LEGACY_DATA_ROOT.is_dir():
+        return
+
+    for name in MIGRATABLE_DATA_FILES:
+        source = LEGACY_DATA_ROOT / name
+        destination = DATA_ROOT / name
+        if source.is_file() and not destination.exists():
+            shutil.copy2(source, destination)
+
+
 def load_config():
     if not RULES_FILE.exists():
         return default_rules()
@@ -219,7 +255,7 @@ def is_protected_domain(domain: str) -> bool:
 
 
 def load_dns_blocklist(directory=None):
-    root = Path(directory) if directory is not None else Path(__file__).resolve().parent
+    root = Path(directory) if directory is not None else RESOURCE_ROOT
     domains = set()
 
     for filename in DNS_BLOCKLIST_FILENAMES:
@@ -452,6 +488,165 @@ def record_activity(event_type, domain, detail):
     save_activity(activity["events"], activity["retention_hours"])
 
 
+def policy_snapshot(config):
+    return {
+        "blocked_domains": list(config.get("blocked_domains", [])),
+        "categories": config.get("categories", {}),
+        "subdomain_prefixes": list(config.get("subdomain_prefixes", DEFAULT_SUBDOMAIN_PREFIXES)),
+    }
+
+
+def load_policy_history():
+    try:
+        with POLICY_HISTORY_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [entry for entry in data if isinstance(entry, dict)][-50:]
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    return []
+
+
+def save_policy_history(entries):
+    try:
+        with POLICY_HISTORY_FILE.open("w", encoding="utf-8") as f:
+            json.dump(entries[-50:], f, indent=2)
+    except OSError:
+        return False
+    return True
+
+
+def archive_policy(config, action):
+    if not config:
+        return False
+    history = load_policy_history()
+    timestamp = datetime.now(timezone.utc).isoformat()
+    history.append({
+        "id": timestamp,
+        "timestamp": timestamp,
+        "action": action,
+        "policy": policy_snapshot(config),
+    })
+    return save_policy_history(history)
+
+
+def load_admin_audit():
+    try:
+        with ADMIN_AUDIT_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [event for event in data if isinstance(event, dict)][-500:]
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    return []
+
+
+def record_admin_audit(action, detail):
+    events = load_admin_audit()
+    events.append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": action,
+        "detail": detail,
+    })
+    try:
+        with ADMIN_AUDIT_FILE.open("w", encoding="utf-8") as f:
+            json.dump(events[-500:], f, indent=2)
+    except OSError:
+        return False
+    return True
+
+
+def render_admin_report(report):
+    def text(value):
+        return html.escape(str(value if value is not None else ""))
+
+    def timestamp(value):
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        except (TypeError, ValueError):
+            return str(value or "Not recorded")
+
+    def table(headers, rows, empty_message):
+        heading = "".join(f"<th scope=\"col\">{text(header)}</th>" for header in headers)
+        if not rows:
+            content = f"<tr><td colspan=\"{len(headers)}\" class=\"empty\">{text(empty_message)}</td></tr>"
+        else:
+            content = "".join("<tr>" + "".join(f"<td>{text(value)}</td>" for value in row) + "</tr>" for row in rows)
+        return f"<div class=\"table-wrap\"><table><thead><tr>{heading}</tr></thead><tbody>{content}</tbody></table></div>"
+
+    policy = report.get("policy", {})
+    categories = policy.get("categories", {})
+    domains = policy.get("blocked_domains", [])
+    prefixes = policy.get("subdomain_prefixes", [])
+    hosts_message, hosts_level = report.get("hosts_status", ["Status unavailable", "warning"])
+    activity = report.get("manual_check_activity", {})
+    activity_events = activity.get("events", [])
+    history = report.get("policy_history", [])
+    audit = report.get("admin_audit", [])
+    rule_count = sum(len(words) for words in categories.values() if isinstance(words, list))
+    hosts_active = re.search(r"\d+ Avantis hostnames in \d+ mappings\.", str(hosts_message)) is not None
+    status_label = "Active" if hosts_active else {"success": "Healthy", "warning": "Check recommended", "error": "Unavailable"}.get(hosts_level, "Status unavailable")
+
+    category_rows = [(category.replace("_", " ").title(), ", ".join(words)) for category, words in sorted(categories.items())]
+    activity_rows = [(timestamp(event.get("timestamp")), event.get("domain"), event.get("detail")) for event in reversed(activity_events)]
+    audit_rows = [(timestamp(event.get("timestamp")), event.get("action"), event.get("detail")) for event in reversed(audit)]
+    history_rows = [(timestamp(version.get("timestamp")), version.get("action"), f"{version.get('domain_count', 0)} domains; {version.get('rule_count', 0)} detection rules") for version in reversed(history)]
+    generated = timestamp(report.get("generated_at"))
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Avantis FireWall Admin Report</title>
+  <style>
+    :root {{ color-scheme: light; font-family: 'Segoe UI', Arial, sans-serif; color: #244253; background: #f3f7f8; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; padding: 32px 20px; }}
+    main {{ width: min(100%, 1040px); margin: 0 auto; }}
+    header {{ padding: 25px 28px; border-top: 4px solid #119cad; background: #fff; }}
+    .eyebrow {{ margin: 0 0 7px; color: #16899a; font-size: 11px; font-weight: 700; letter-spacing: 1.2px; }}
+    h1 {{ margin: 0; color: #193b4d; font: 700 28px Georgia, serif; }}
+    header p:last-child {{ margin: 8px 0 0; color: #6a8290; font-size: 13px; }}
+    section {{ margin-top: 18px; padding: 20px 22px; border: 1px solid #dce8ec; background: #fff; }}
+    h2 {{ margin: 0 0 14px; color: #23485c; font-size: 16px; }}
+    .summary {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }}
+    .metric {{ min-width: 0; padding: 13px; border: 1px solid #e3ecef; background: #f8fbfc; }}
+    .metric span, .metric strong {{ display: block; }}
+    .metric span {{ color: #6b8390; font-size: 11px; }}
+    .metric strong {{ margin-top: 6px; overflow-wrap: anywhere; color: #173f52; font-size: 17px; }}
+    .note {{ margin: 12px 0 0; color: #536f7e; font-size: 12px; line-height: 1.6; }}
+    .table-wrap {{ overflow-x: auto; }}
+    table {{ width: 100%; border-collapse: collapse; text-align: left; }}
+    th {{ padding: 9px 10px; color: #66808e; background: #f5f9fa; font-size: 10px; font-weight: 700; }}
+    td {{ padding: 10px; border-top: 1px solid #e9eff1; color: #365665; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }}
+    .empty {{ color: #7b8d96; text-align: center; }}
+    .prefixes {{ margin: 0; color: #536f7e; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }}
+    footer {{ padding: 17px 4px; color: #718792; font-size: 11px; }}
+    @media (max-width: 700px) {{ body {{ padding: 14px 10px; }} section {{ padding: 16px 13px; }} .summary {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} h1 {{ font-size: 24px; }} }}
+    @media print {{ body {{ padding: 0; background: #fff; }} section, header {{ break-inside: avoid; border-color: #ccd8dc; }} main {{ width: 100%; }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <header><p class="eyebrow">AVANTIS FIREWALL · ADMINISTRATION</p><h1>Protection report</h1><p>Generated {text(generated)}</p></header>
+    <section><h2>At a glance</h2><div class="summary"><div class="metric"><span>Protection profile</span><strong>{text(policy.get('protection_profile', 'Unknown').replace('_', ' ').title())}</strong></div><div class="metric"><span>Blocked domains</span><strong>{len(domains)}</strong></div><div class="metric"><span>Detection rules</span><strong>{rule_count}</strong></div><div class="metric"><span>Windows hosts status</span><strong>{text(status_label)}</strong></div></div><p class="note">{text(hosts_message)}</p></section>
+    <section><h2>Blocked domains</h2>{table(['Domain'], [(domain,) for domain in domains], 'No blocked domains are configured.')}</section>
+    <section><h2>Detection rules</h2>{table(['Category', 'Configured terms'], category_rows, 'No detection categories are configured.')}</section>
+    <section><h2>Subdomain coverage</h2><p class="prefixes">{text(', '.join(prefixes) if prefixes else 'No subdomain prefixes configured.')}</p></section>
+    <section><h2>Manual website checks</h2><p class="note">These are checks entered manually in Avantis, not a browsing history. Retention: {text(activity.get('retention_hours', 24))} hours.</p>{table(['Time', 'Checked address', 'Result'], activity_rows, 'No manual checks are currently stored.')}</section>
+    <section><h2>Administrative audit</h2>{table(['Time', 'Action', 'Details'], audit_rows, 'No administrative actions are recorded.')}</section>
+    <section><h2>Policy history</h2>{table(['Time', 'Change', 'Saved policy'], history_rows, 'No previous policy versions are saved yet.')}</section>
+    <footer>Generated locally by Avantis FireWall. This report does not contain the Safe Mode password. Review manual-check entries before sharing.</footer>
+  </main>
+</body>
+</html>
+"""
+
+
 def inspect_hosts_rules():
     if not os.path.exists(WINDOWS_HOSTS_PATH):
         return "Hosts file check failed: Windows hosts file not found.", "error"
@@ -572,22 +767,116 @@ def is_admin():
         return False
 
 
-def relaunch_as_admin():
+def run_as_admin(operation):
     if os.name != "nt":
         return False
 
     import ctypes
-    script_path = str(Path(__file__).resolve())
-    parameters = subprocess.list2cmdline([script_path])
-    result = ctypes.windll.shell32.ShellExecuteW(
-        None,
-        "runas",
-        str(Path(sys.executable).resolve()),
-        parameters,
-        str(Path(__file__).resolve().parent),
-        1,
-    )
-    return result > 32
+    from ctypes import wintypes
+
+    executable_path = Path(sys.executable).resolve()
+    result_fd, result_path = tempfile.mkstemp(prefix="avantis-hosts-", suffix=".json")
+    os.close(result_fd)
+
+    if getattr(sys, "frozen", False):
+        arguments = ["--hosts-helper", operation, result_path]
+        working_directory = str(APP_ROOT)
+    else:
+        script_path = str(Path(__file__).resolve())
+        arguments = [script_path, "--hosts-helper", operation, result_path]
+        working_directory = str(APP_ROOT)
+
+    class ShellExecuteInfo(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("fMask", wintypes.ULONG),
+            ("hwnd", wintypes.HWND),
+            ("lpVerb", wintypes.LPCWSTR),
+            ("lpFile", wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory", wintypes.LPCWSTR),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", ctypes.c_void_p),
+            ("lpIDList", ctypes.c_void_p),
+            ("lpClass", wintypes.LPCWSTR),
+            ("hkeyClass", ctypes.c_void_p),
+            ("dwHotKey", wintypes.DWORD),
+            ("hIcon", ctypes.c_void_p),
+            ("hProcess", wintypes.HANDLE),
+        ]
+
+    info = ShellExecuteInfo()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = 0x40
+    info.lpVerb = "runas"
+    info.lpFile = str(executable_path)
+    info.lpParameters = subprocess.list2cmdline(arguments)
+    info.lpDirectory = working_directory
+    info.nShow = 0
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(ShellExecuteInfo)]
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    try:
+        if not shell32.ShellExecuteExW(ctypes.byref(info)):
+            error_code = ctypes.get_last_error()
+            if error_code == 1223:
+                raise PermissionError("Administrator approval was cancelled.")
+            raise OSError(error_code, ctypes.FormatError(error_code))
+
+        if not info.hProcess:
+            raise OSError("Windows did not provide a process handle for the elevated operation.")
+        wait_result = kernel32.WaitForSingleObject(info.hProcess, 0xFFFFFFFF)
+        if wait_result != 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        response_path = Path(result_path)
+        if not response_path.is_file():
+            raise RuntimeError(f"The elevated hosts operation exited with status {exit_code.value} without returning a result.")
+        response = json.loads(response_path.read_text(encoding="utf-8"))
+        if "error" in response:
+            raise RuntimeError(response["error"])
+        if exit_code.value != 0 or "result" not in response:
+            raise RuntimeError(f"The elevated hosts operation failed with status {exit_code.value}.")
+        return response["result"]
+    finally:
+        if info.hProcess:
+            kernel32.CloseHandle(info.hProcess)
+        try:
+            os.unlink(result_path)
+        except FileNotFoundError:
+            pass
+
+
+def run_hosts_helper(operation, result_path):
+    try:
+        if operation not in {"apply", "remove"}:
+            raise ValueError("Unknown elevated hosts operation.")
+        if not is_admin():
+            raise PermissionError("The elevated hosts helper did not receive administrator access.")
+        initialize_data_root()
+        api = DesktopApi()
+        result = api.apply_hosts() if operation == "apply" else api.remove_hosts()
+        response = {"result": result}
+    except Exception as error:
+        response = {"error": str(error)}
+        exit_code = 1
+    else:
+        exit_code = 0
+
+    Path(result_path).write_text(json.dumps(response), encoding="utf-8")
+    return exit_code
 
 
 def replace_windows_hosts_file(target_path: str, new_content: str):
@@ -829,7 +1118,6 @@ class BlockerApp(tk.Tk):
         host_buttons.pack(fill="x")
         ttk.Button(host_buttons, text="Apply to Hosts", command=self.apply_blocking, style="Accent.TButton").pack(side="left", padx=(0, 8))
         ttk.Button(host_buttons, text="Remove Hosts Rules", command=self.remove_blocking, style="Secondary.TButton").pack(side="left", padx=(0, 8))
-        ttk.Button(host_buttons, text="Export DNS Feed", command=self.export_dns_feed, style="Secondary.TButton").pack(side="left", padx=(0, 8))
         ttk.Button(host_buttons, text="Check Hosts File", command=self.refresh_hosts_status, style="Secondary.TButton").pack(side="left")
         self.hosts_status_label = ttk.Label(host_frame, text="Hosts file check not run.", style="Muted.TLabel", wraplength=800)
         self.hosts_status_label.pack(anchor="w", pady=(10, 0))
@@ -1222,7 +1510,7 @@ class BlockerApp(tk.Tk):
         if result["keywords"]:
             reasons.append(f"matched words: {', '.join(result['keywords'])}")
         if result["signals"]:
-            reasons.append("smart signals:\n- " + "\n- ".join(result["signals"]))
+            reasons.append("Additional local risk indicators:\n- " + "\n- ".join(result["signals"]))
         reasons.append(f"recommendation: {result['recommendation']}")
 
         if reasons:
@@ -1601,14 +1889,19 @@ class BlockerApp(tk.Tk):
 
     def apply_blocking(self):
         if len(self.blocklist) > HOSTS_DOMAIN_LIMIT:
-            show_app_dialog(self, "Hosts list is too large", f"This list contains {len(self.blocklist)} domains. Windows hosts mode is limited to {HOSTS_DOMAIN_LIMIT} domains in Avantis to avoid slow DNS and security-tool locks. Use Export DNS Feed for enterprise-scale filtering.", "warning")
+            show_app_dialog(self, "Hosts list is too large", f"This list contains {len(self.blocklist)} domains. Windows hosts mode is limited to {HOSTS_DOMAIN_LIMIT} domains in Avantis to avoid slow DNS and security-tool locks. Use a managed DNS service for larger lists.", "warning")
             return
 
         if not is_admin():
-            if relaunch_as_admin():
-                self.destroy()
-            else:
-                show_app_dialog(self, "Administrator required", "Windows elevation was cancelled. Allow Avantis FireWall through the UAC prompt to update the hosts file.", "error")
+            try:
+                result = run_as_admin("apply")
+                self.refresh_hosts_status()
+                message = "The configured domains and common subdomains were added to the Windows hosts file."
+                if not result["flushed"]:
+                    message += f"\n\nWindows could not flush its DNS cache: {result['error']}"
+                show_app_dialog(self, "Protection applied", message, "success" if result["flushed"] else "warning")
+            except Exception as error:
+                show_app_dialog(self, "Could not apply protection", str(error), "error")
             return
 
         try:
@@ -1623,33 +1916,20 @@ class BlockerApp(tk.Tk):
             self.refresh_hosts_status()
             show_app_dialog(self, "Could not apply protection", str(e), "error")
 
-    def export_dns_feed(self):
-        file_path = filedialog.asksaveasfilename(
-            parent=self,
-            title="Export enterprise DNS blocklist",
-            defaultextension=".txt",
-            filetypes=[("DNS domain list", "*.txt"), ("All files", "*.*")],
-            initialfile="avantis-dns-blocklist.txt",
-        )
-        if not file_path:
-            return
-
-        domains = sorted({domain for domain in self.blocklist if not is_protected_domain(domain)})
-        try:
-            Path(file_path).write_text("\n".join(domains) + "\n", encoding="utf-8")
-            show_app_dialog(self, "DNS feed exported", f"Exported {len(domains)} domains. Import this file into your managed DNS, filtering gateway, or enterprise policy system.", "success")
-        except OSError as error:
-            show_app_dialog(self, "Could not export DNS feed", str(error), "error")
-
     def remove_blocking(self):
-        if not is_admin():
-            if relaunch_as_admin():
-                self.destroy()
-            else:
-                show_app_dialog(self, "Administrator required", "Windows elevation was cancelled. Allow Avantis FireWall through the UAC prompt to change the hosts file.", "error")
+        if not show_app_dialog(self, "Remove hosts rules", "Remove only the Avantis FireWall rules from the Windows hosts file?", "warning", confirm=True):
             return
 
-        if not show_app_dialog(self, "Remove hosts rules", "Remove only the Avantis FireWall rules from the Windows hosts file?", "warning", confirm=True):
+        if not is_admin():
+            try:
+                result = run_as_admin("remove")
+                self.refresh_hosts_status()
+                message = "The Avantis FireWall hosts rules were removed." if result["removed"] else "No Avantis FireWall hosts rules were found."
+                if not result["flushed"]:
+                    message += f"\n\nWindows could not flush its DNS cache: {result['error']}"
+                show_app_dialog(self, "Protection removed", message, "success" if result["flushed"] else "warning")
+            except Exception as error:
+                show_app_dialog(self, "Could not remove hosts rules", str(error), "error")
             return
 
         try:
@@ -1677,8 +1957,17 @@ class DesktopApi:
     def attach_window(self, window):
         self.window = window
 
-    def _save_rules(self):
+    def _save_rules(self, action="Policy settings updated"):
+        previous_policy = policy_snapshot(load_config())
+        current_policy = {
+            "blocked_domains": self.blocklist,
+            "categories": self.categories,
+            "subdomain_prefixes": self.subdomain_prefixes,
+        }
         save_rules(self.blocklist, self.categories, self.subdomain_prefixes, self.current_profile, self.profile_password)
+        if previous_policy != current_policy:
+            archive_policy({**previous_policy}, action)
+        record_admin_audit(action, f"{len(self.blocklist)} blocked domains; {sum(len(words) for words in self.categories.values())} detection rules.")
 
     def _authorize(self, password, action):
         if self.current_profile == "child_protection" and self.profile_password and password != self.profile_password:
@@ -1694,6 +1983,107 @@ class DesktopApi:
                 seen.add(domain)
         return domains
 
+    def get_policy_history(self):
+        summaries = []
+        for entry in reversed(load_policy_history()):
+            policy = entry.get("policy", {})
+            summaries.append({
+                "id": entry.get("id", ""),
+                "timestamp": entry.get("timestamp", ""),
+                "action": entry.get("action", "Policy update"),
+                "domain_count": len(policy.get("blocked_domains", [])),
+                "rule_count": sum(len(words) for words in policy.get("categories", {}).values() if isinstance(words, list)),
+            })
+        return summaries
+
+    def _validate_policy_document(self, document):
+        policy = document.get("policy", document) if isinstance(document, dict) else None
+        if not isinstance(policy, dict):
+            raise ValueError("The selected file is not an Avantis policy file.")
+        if isinstance(document, dict) and document.get("schema_version", 1) != 1:
+            raise ValueError("This policy file uses an unsupported schema version.")
+        domains = policy.get("blocked_domains")
+        categories = policy.get("categories")
+        prefixes = policy.get("subdomain_prefixes")
+        if not isinstance(domains, list) or not isinstance(categories, dict) or not isinstance(prefixes, list):
+            raise ValueError("The policy must contain domain, category, and subdomain-prefix lists.")
+
+        clean_domains = []
+        seen_domains = set()
+        for value in domains:
+            if not isinstance(value, str):
+                raise ValueError("Every blocked-domain entry must be text.")
+            domain = normalize_domain(value)
+            if not is_valid_domain(domain):
+                raise ValueError(f"Invalid domain in policy: {value}")
+            if not is_protected_domain(domain) and domain not in seen_domains:
+                clean_domains.append(domain)
+                seen_domains.add(domain)
+
+        clean_categories = {}
+        for name, keywords in categories.items():
+            category = str(name).strip().lower()
+            if not category or not isinstance(keywords, list):
+                raise ValueError("Every policy category must have a name and a list of keywords.")
+            if any(not isinstance(keyword, str) for keyword in keywords):
+                raise ValueError(f"Every detection rule in {category} must be text.")
+            clean_categories[category] = list(dict.fromkeys(
+                keyword.strip().lower() for keyword in keywords if keyword.strip()
+            ))
+
+        clean_prefixes = []
+        for value in prefixes:
+            if not isinstance(value, str):
+                raise ValueError("Every subdomain prefix must be text.")
+            prefix = value.strip().lower()
+            if not re.fullmatch(r"[a-z0-9-]{1,63}", prefix):
+                raise ValueError(f"Invalid subdomain prefix in policy: {value}")
+            if prefix not in clean_prefixes:
+                clean_prefixes.append(prefix)
+        return {
+            "blocked_domains": clean_domains,
+            "categories": clean_categories,
+            "subdomain_prefixes": clean_prefixes,
+        }
+
+    def import_policy(self, password=""):
+        self._authorize(password, "import a policy")
+        import webview
+
+        selection = self.window.create_file_dialog(
+            webview.OPEN_DIALOG,
+            allow_multiple=False,
+            file_types=("Avantis policy (*.json)",),
+        )
+        if not selection:
+            return {"cancelled": True, "state": self.get_state()}
+        selected_path = selection[0] if isinstance(selection, (list, tuple)) else selection
+        try:
+            document = json.loads(Path(selected_path).read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"Could not read the selected policy file: {error}") from error
+        policy = self._validate_policy_document(document)
+        self.blocklist = policy["blocked_domains"]
+        self.categories = policy["categories"]
+        self.subdomain_prefixes = policy["subdomain_prefixes"]
+        self._save_rules("Policy imported")
+        return {"cancelled": False, "state": self.get_state()}
+
+    def restore_policy_version(self, snapshot_id, password=""):
+        self._authorize(password, "restore a previous policy")
+        snapshot = next((
+            entry for entry in load_policy_history()
+            if entry.get("id") == snapshot_id
+        ), None)
+        if not snapshot:
+            raise ValueError("That policy version is no longer available.")
+        policy = self._validate_policy_document(snapshot.get("policy"))
+        self.blocklist = policy["blocked_domains"]
+        self.categories = policy["categories"]
+        self.subdomain_prefixes = policy["subdomain_prefixes"]
+        self._save_rules("Previous policy restored")
+        return self.get_state()
+
     def get_state(self):
         print("Avantis get_state request received.", flush=True)
         state = {
@@ -1704,6 +2094,8 @@ class DesktopApi:
             "has_profile_password": bool(self.profile_password),
             "hosts_status": inspect_hosts_rules(),
             "activity": load_activity(),
+            "policy_history": self.get_policy_history(),
+            "admin_audit": load_admin_audit(),
         }
         print("Avantis get_state request completed.", flush=True)
         return state
@@ -1719,7 +2111,7 @@ class DesktopApi:
         if not domains:
             raise ValueError("No valid new domains were found.")
         self.blocklist.extend(domains)
-        self._save_rules()
+        self._save_rules("Domains added")
         return {"added": domains, "state": self.get_state()}
 
     def import_file(self, password=""):
@@ -1751,7 +2143,7 @@ class DesktopApi:
         if not domains:
             raise ValueError("The selected file did not contain any new valid domains.")
         self.blocklist.extend(domains)
-        self._save_rules()
+        self._save_rules("Domains imported")
         return {"added": domains, "source": path.name, "state": self.get_state()}
 
     def change_profile(self, profile, password="", new_password=""):
@@ -1766,7 +2158,7 @@ class DesktopApi:
                 raise ValueError("Set a password before enabling Safe Mode.")
             self.profile_password = new_password.strip()
         self.current_profile = profile
-        self._save_rules()
+        self._save_rules("Protection profile changed")
         return self.get_state()
 
     def admin_access(self, password=""):
@@ -1782,27 +2174,27 @@ class DesktopApi:
         if self.profile_password and current_password != self.profile_password:
             raise PermissionError("The current admin password is incorrect.")
         self.profile_password = new_password.strip()
-        self._save_rules()
+        self._save_rules("Admin password settings changed")
         return self.get_state()
 
     def restore_admin(self, password=""):
         if self.profile_password and password != self.profile_password:
             raise PermissionError("The admin password is incorrect.")
         self.current_profile = "default"
-        self._save_rules()
+        self._save_rules("Admin mode restored")
         return self.get_state()
 
     def remove_domains(self, domains, password=""):
         self._authorize(password, "remove domains")
         selected = set(domains)
         self.blocklist = [domain for domain in self.blocklist if domain not in selected]
-        self._save_rules()
+        self._save_rules("Domains removed")
         return self.get_state()
 
     def clear_domains(self, password=""):
         self._authorize(password, "clear the blocked list")
         self.blocklist.clear()
-        self._save_rules()
+        self._save_rules("Blocked domains cleared")
         return self.get_state()
 
     def add_rule(self, category, keyword, password=""):
@@ -1814,7 +2206,7 @@ class DesktopApi:
         self.categories.setdefault(category, [])
         if keyword not in self.categories[category]:
             self.categories[category].append(keyword)
-            self._save_rules()
+            self._save_rules("Detection rule added")
         return self.get_state()
 
     def remove_rules(self, rules, password=""):
@@ -1826,7 +2218,7 @@ class DesktopApi:
                 self.categories[category] = [item for item in self.categories[category] if item != keyword]
                 if not self.categories[category]:
                     del self.categories[category]
-        self._save_rules()
+        self._save_rules("Detection rules removed")
         return self.get_state()
 
     def get_dictionary(self):
@@ -1846,48 +2238,43 @@ class DesktopApi:
             raise ValueError("Choose a supported activity retention period.")
         activity = load_activity()
         save_activity(activity["events"], retention_hours)
+        record_admin_audit("Activity retention changed", f"Retention set to {retention_hours} hours.")
         return load_activity()
 
     def clear_activity(self):
         activity = load_activity()
         save_activity([], activity["retention_hours"])
+        record_admin_audit("Manual-check activity cleared", "Stored manual-check records were cleared.")
         return load_activity()
 
     def apply_hosts(self):
+        if os.name == "nt" and not is_admin():
+            return run_as_admin("apply")
         if len(self.blocklist) > HOSTS_DOMAIN_LIMIT:
-            raise ValueError(f"Windows hosts mode is limited to {HOSTS_DOMAIN_LIMIT} domains. Export a DNS feed for larger lists.")
+            raise ValueError(f"Windows hosts mode is limited to {HOSTS_DOMAIN_LIMIT} domains. Use a managed DNS service for larger lists.")
         write_hosts_file(self.blocklist, self.subdomain_prefixes)
         flushed, error = flush_dns_cache()
+        record_admin_audit("Hosts protection applied", f"{len(self.blocklist)} blocked domains applied.")
         return {"flushed": flushed, "error": error, "hosts_status": inspect_hosts_rules()}
 
     def remove_hosts(self):
+        if os.name == "nt" and not is_admin():
+            return run_as_admin("remove")
         removed = remove_hosts_rules()
         flushed, error = flush_dns_cache()
+        record_admin_audit("Hosts protection removed", "Avantis hosts rules were removed." if removed else "No Avantis hosts rules were present.")
         return {"removed": removed, "flushed": flushed, "error": error, "hosts_status": inspect_hosts_rules()}
 
-    def export_dns_feed(self):
-        import webview
-
-        selection = self.window.create_file_dialog(webview.SAVE_DIALOG, save_filename="avantis-dns-blocklist.txt", file_types=("DNS domain list (*.txt)",))
-        if not selection:
-            return {"cancelled": True}
-        domains = sorted({domain for domain in self.blocklist if not is_protected_domain(domain)})
-        selected_path = selection[0] if isinstance(selection, (list, tuple)) else selection
-        Path(selected_path).write_text("\n".join(domains) + "\n", encoding="utf-8")
-        return {"cancelled": False, "count": len(domains)}
-
-
 def main():
-    if os.name == "nt" and not is_admin():
-        if relaunch_as_admin():
-            return
+    if not show_first_run_agreement():
         return
 
+    initialize_data_root()
     os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
     import webview
 
     api = DesktopApi()
-    interface_path = (Path(__file__).with_name("web") / "dist" / "index.html").resolve()
+    interface_path = (RESOURCE_ROOT / "web" / "dist" / "index.html").resolve()
     if not interface_path.is_file():
         raise FileNotFoundError("The React interface is not built yet. Run npm.cmd install and npm.cmd run build from the web folder.")
 
@@ -1903,8 +2290,91 @@ def main():
     print(f"Avantis loading interface: {interface_path}", flush=True)
     window.events.loaded += lambda: print("Avantis React document loaded.", flush=True)
     window.events._pywebviewready += lambda: print("Avantis Python bridge ready.", flush=True)
-    webview.start(gui="qt")
+    webview.start(gui="qt", icon=str(APP_ICON_FILE) if APP_ICON_FILE.exists() else None)
+
+
+def show_first_run_agreement():
+    try:
+        with AGREEMENT_FILE.open("r", encoding="utf-8") as f:
+            accepted = json.load(f)
+        if accepted.get("version") == AGREEMENT_VERSION and accepted.get("accepted") is True:
+            return True
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    root = tk.Tk()
+    root.title("Avantis FireWall - Terms and Privacy")
+    root.geometry("760x600")
+    root.minsize(640, 520)
+    root.configure(background="#f4f9fb")
+    if APP_ICON_FILE.exists():
+        try:
+            root.iconbitmap(str(APP_ICON_FILE))
+        except tk.TclError:
+            pass
+
+    accepted = []
+    agreed = tk.BooleanVar(value=False)
+    outer = ttk.Frame(root, padding=(28, 24))
+    outer.pack(fill="both", expand=True)
+    ttk.Label(outer, text="AVANTIS FIREWALL", foreground="#0b8194", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+    ttk.Label(outer, text="Before you continue", foreground="#173a50", font=("Segoe UI", 22, "bold")).pack(anchor="w", pady=(8, 4))
+    ttk.Label(outer, text="Please review and accept these terms and the privacy notice.", foreground="#617c8d", font=("Segoe UI", 10)).pack(anchor="w", pady=(0, 18))
+
+    text_frame = ttk.Frame(outer)
+    text_frame.pack(fill="both", expand=True)
+    policy_text = tk.Text(text_frame, wrap="word", height=14, padx=16, pady=14, relief="solid", borderwidth=1, background="#ffffff", foreground="#294c61", font=("Segoe UI", 10), spacing1=2, spacing3=5)
+    scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=policy_text.yview)
+    policy_text.configure(yscrollcommand=scrollbar.set)
+    policy_text.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+    policy_text.tag_configure("heading", font=("Segoe UI", 11, "bold"), foreground="#173f52", spacing1=12, spacing3=5)
+    policy_text.insert("end", "TERMS OF USE\n", "heading")
+    policy_text.insert("end", "Use Avantis only on a device you own or are authorized to administer. Protection changes can affect everyone using this PC. You are responsible for choosing appropriate rules and complying with applicable law and workplace or family policies.\n\n")
+    policy_text.insert("end", "HOW PROTECTION WORKS\n", "heading")
+    policy_text.insert("end", "Check a website runs local rule-based analysis and reports its findings; it does not change access. Blocking works by adding a domain to your blocklist and selecting Apply to Hosts. Avantis then writes the domain and its configured subdomain rules to this PC's Windows hosts file. The applied rules affect all browsers and Windows user accounts on this PC. A listed domain is blocked even if the site is legitimate or safe, and people using this PC cannot access it while its rule remains applied. Remove the domain and select Apply to Hosts again, or use Remove Rules, to restore access.\n\n")
+    policy_text.insert("end", "ADMINISTRATOR ACCESS\n", "heading")
+    policy_text.insert("end", "Avantis normally opens without administrator approval. Windows requests Administrator approval only when you choose to apply or remove hosts protection. Approve that prompt only if you are authorized to administer this PC. Applying or removing protection changes the Windows hosts file and can affect every user of this PC. Avantis changes only its own managed hosts-file entries.\n\n")
+    policy_text.insert("end", "SAFE MODE AND PASSWORD\n", "heading")
+    policy_text.insert("end", "Safe Mode is an optional restricted profile that limits editing and hides administration pages. When you first switch to Safe Mode without a password, Avantis asks you to create one. Use the Safe Mode password control to set or change it. When set, the password is required to unlock administrator controls or return to Admin mode. Choose a unique password and keep it available: it is stored locally with this PC's settings, is not an online account password, and is not included in exported policy files. Removing the password removes the password gate.\n\n")
+    policy_text.insert("end", "PRIVACY NOTICE\n", "heading")
+    policy_text.insert("end", "Avantis does not require an account. Manual checks, protection settings, and administrative actions are kept on this device; normal browsing is not monitored. If you choose to download a public blocklist, your device connects to that list's provider. Avantis does not send your browsing history to that provider.\n\n")
+    policy_text.insert("end", "Policy backup files are created only when you request them and do not include your Safe Mode password. Manual-check activity can be cleared in the app; administrative actions remain available locally for review.\n\n")
+    policy_text.insert("end", "By selecting “I agree” and continuing, you confirm that you have read and accept these Terms of Use and acknowledge this Privacy Notice.")
+    policy_text.configure(state="disabled")
+
+    ttk.Checkbutton(outer, text="I agree to the Terms of Use and acknowledge the Privacy Notice.", variable=agreed).pack(anchor="w", pady=(16, 12))
+    buttons = ttk.Frame(outer)
+    buttons.pack(fill="x")
+    continue_button = ttk.Button(buttons, text="Agree and continue", state="disabled")
+    continue_button.pack(side="right")
+    ttk.Button(buttons, text="Decline and exit", command=root.destroy).pack(side="right", padx=(0, 8))
+
+    def update_continue(*_):
+        continue_button.configure(state="normal" if agreed.get() else "disabled")
+
+    def accept_terms():
+        if not agreed.get():
+            return
+        try:
+            AGREEMENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with AGREEMENT_FILE.open("w", encoding="utf-8") as f:
+                json.dump({"version": AGREEMENT_VERSION, "accepted": True, "accepted_at": datetime.now(timezone.utc).isoformat()}, f, indent=2)
+        except OSError as error:
+            messagebox.showerror("Could not save your agreement", "Avantis could not save your acceptance. Please try again.", parent=root)
+            return
+        accepted.append(True)
+        root.destroy()
+
+    agreed.trace_add("write", update_continue)
+    continue_button.configure(command=accept_terms)
+    root.bind("<Return>", lambda _event: accept_terms() if agreed.get() else None)
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    root.mainloop()
+    return bool(accepted)
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "--hosts-helper":
+        sys.exit(run_hosts_helper(sys.argv[2], sys.argv[3]))
     main()
