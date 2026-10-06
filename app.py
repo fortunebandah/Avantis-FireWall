@@ -1,6 +1,9 @@
 import json
 import html
+import base64
 import difflib
+import hashlib
+import hmac
 import ipaddress
 import os
 import re
@@ -50,6 +53,8 @@ DNS_BLOCKLIST_FILENAMES = (
 )
 PROFILE_LABELS = {"default": "Admin", "child_protection": "Safe Mode"}
 PROFILE_VALUES = {label: value for value, label in PROFILE_LABELS.items()}
+PROFILE_PASSWORD_HASH_PREFIX = "pbkdf2_sha256$"
+PROFILE_PASSWORD_HASH_ITERATIONS = 600_000
 DOMAIN_PATTERN = re.compile(r"(?i)(?:https?://)?(?:www\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}")
 VALID_DOMAIN_PATTERN = re.compile(r"(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
@@ -77,6 +82,58 @@ DEFAULT_CATEGORIES = {
         "investment scam", "double your money", "urgent payment", "verify account"
     ],
 }
+
+def _parse_profile_password_hash(value):
+    try:
+        scheme, iterations_text, salt_text, digest_text = value.split("$")
+        iterations = int(iterations_text)
+        salt = base64.b64decode(salt_text + "=" * (-len(salt_text) % 4), altchars=b"-_", validate=True)
+        digest = base64.b64decode(digest_text + "=" * (-len(digest_text) % 4), altchars=b"-_", validate=True)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if (
+        scheme != "pbkdf2_sha256"
+        or not 100_000 <= iterations <= 2_000_000
+        or len(salt) != 16
+        or len(digest) != hashlib.sha256().digest_size
+    ):
+        return None
+    return iterations, salt, digest
+
+
+def hash_profile_password(password):
+    password = str(password or "")
+    if not password:
+        return ""
+    if password.startswith(PROFILE_PASSWORD_HASH_PREFIX):
+        if _parse_profile_password_hash(password) is None:
+            raise ValueError("The saved Safe Mode password hash is invalid.")
+        return password
+
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        PROFILE_PASSWORD_HASH_ITERATIONS,
+    )
+    salt_text = base64.urlsafe_b64encode(salt).decode("ascii").rstrip("=")
+    digest_text = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return f"{PROFILE_PASSWORD_HASH_PREFIX}{PROFILE_PASSWORD_HASH_ITERATIONS}${salt_text}${digest_text}"
+
+
+def verify_profile_password(password, stored_value):
+    password = str(password or "")
+    stored_value = str(stored_value or "")
+    if stored_value.startswith(PROFILE_PASSWORD_HASH_PREFIX):
+        parsed = _parse_profile_password_hash(stored_value)
+        if parsed is None:
+            return False
+        iterations, salt, expected_digest = parsed
+        actual_digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(actual_digest, expected_digest)
+    return hmac.compare_digest(password, stored_value)
+
 
 DEFAULT_BLOCKLIST = [
     "pornhub.com",
@@ -219,7 +276,22 @@ def load_config():
             if profile_name in {"default", "child_protection"}:
                 config["protection_profile"] = profile_name
             password_value = data.get("profile_password", "")
-            config["profile_password"] = str(password_value) if password_value is not None else ""
+            stored_password = str(password_value) if password_value is not None else ""
+            migrate_password = bool(stored_password) and not stored_password.startswith(PROFILE_PASSWORD_HASH_PREFIX)
+            if stored_password.startswith(PROFILE_PASSWORD_HASH_PREFIX) and _parse_profile_password_hash(stored_password) is None:
+                raise RuntimeError("The saved Safe Mode password hash is invalid. Restore a valid rules.json backup before continuing.")
+            config["profile_password"] = hash_profile_password(stored_password) if migrate_password else stored_password
+            if migrate_password:
+                try:
+                    save_rules(
+                        config["blocked_domains"],
+                        config["categories"],
+                        config["subdomain_prefixes"],
+                        config["protection_profile"],
+                        config["profile_password"],
+                    )
+                except OSError as error:
+                    raise RuntimeError("Avantis could not securely upgrade the saved Safe Mode password. Check that rules.json is writable, then restart the app.") from error
             return config
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         pass
@@ -428,14 +500,28 @@ def save_rules(blocklist, categories, subdomain_prefixes=None, protection_profil
     if profile_value not in {"default", "child_protection"}:
         profile_value = "default"
 
-    with RULES_FILE.open("w", encoding="utf-8") as f:
-        json.dump({
-            "blocked_domains": unique,
-            "categories": categories,
-            "subdomain_prefixes": subdomain_prefixes or DEFAULT_SUBDOMAIN_PREFIXES,
-            "protection_profile": profile_value,
-            "profile_password": str(profile_password or ""),
-        }, f, indent=2)
+    config = {
+        "blocked_domains": unique,
+        "categories": categories,
+        "subdomain_prefixes": subdomain_prefixes or DEFAULT_SUBDOMAIN_PREFIXES,
+        "protection_profile": profile_value,
+        "profile_password": hash_profile_password(profile_password),
+    }
+    temporary_fd, temporary_path = tempfile.mkstemp(
+        prefix=f"{RULES_FILE.name}.",
+        suffix=".tmp",
+        dir=str(RULES_FILE.parent),
+    )
+    temporary_file = Path(temporary_path)
+    try:
+        with os.fdopen(temporary_fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_file, RULES_FILE)
+    finally:
+        if temporary_file.exists():
+            temporary_file.unlink()
 
 def load_activity():
     default = {"retention_hours": RETENTION_OPTIONS["24 hours"], "events": []}
@@ -1333,7 +1419,7 @@ class BlockerApp(tk.Tk):
                 show="*",
                 parent=self,
             )
-            if password != self.profile_password:
+            if not verify_profile_password(password, self.profile_password):
                 show_app_dialog(self, "Access blocked", "The admin password is incorrect.", "warning")
                 return
 
@@ -1411,7 +1497,7 @@ class BlockerApp(tk.Tk):
                 show="*",
                 parent=self,
             )
-            if current != self.profile_password:
+            if not verify_profile_password(current, self.profile_password):
                 show_app_dialog(self, "Password change denied", "The current password is incorrect.", "warning")
                 return
 
@@ -1423,7 +1509,7 @@ class BlockerApp(tk.Tk):
         )
         if new_password is None:
             return
-        self.profile_password = new_password.strip()
+        self.profile_password = hash_profile_password(new_password.strip())
         self.save_current_rules()
         self.refresh_profile_status()
         if self.current_profile == "child_protection" and self.profile_password:
@@ -1444,7 +1530,7 @@ class BlockerApp(tk.Tk):
                 show="*",
                 parent=self,
             )
-            if password != self.profile_password:
+            if not verify_profile_password(password, self.profile_password):
                 self.profile_var.set(PROFILE_LABELS[self.current_profile])
                 show_app_dialog(self, "Access blocked", "Only the admin password can change the protection profile.", "warning")
                 return
@@ -1459,7 +1545,7 @@ class BlockerApp(tk.Tk):
             if answer is None or not answer.strip():
                 self.profile_var.set(PROFILE_LABELS[self.current_profile])
                 return
-            self.profile_password = answer.strip()
+            self.profile_password = hash_profile_password(answer.strip())
 
         self.current_profile = selected
         self.save_current_rules()
@@ -1474,7 +1560,7 @@ class BlockerApp(tk.Tk):
             show="*",
             parent=self,
         )
-        if password == self.profile_password:
+        if verify_profile_password(password, self.profile_password):
             return True
         show_app_dialog(self, "Access blocked", "This profile is locked. Only the admin password can edit website protection or the block list.", "warning")
         return False
@@ -2000,7 +2086,7 @@ class DesktopApi:
         record_admin_audit(action, f"{len(self.blocklist)} blocked domains; {sum(len(words) for words in self.categories.values())} detection rules.")
 
     def _authorize(self, password, action):
-        if self.current_profile == "child_protection" and self.profile_password and password != self.profile_password:
+        if self.current_profile == "child_protection" and self.profile_password and not verify_profile_password(password, self.profile_password):
             raise PermissionError(f"The admin password is required to {action} in Safe Mode.")
 
     def _parse_domains(self, value):
@@ -2181,18 +2267,18 @@ class DesktopApi:
             raise ValueError("Unknown protection profile.")
         if profile == self.current_profile:
             return self.get_state()
-        if self.profile_password and password != self.profile_password:
+        if self.profile_password and not verify_profile_password(password, self.profile_password):
             raise PermissionError("The admin password is required to change the protection profile.")
         if profile == "child_protection" and not self.profile_password:
             if not new_password.strip():
                 raise ValueError("Set a password before enabling Safe Mode.")
-            self.profile_password = new_password.strip()
+            self.profile_password = hash_profile_password(new_password.strip())
         self.current_profile = profile
         self._save_rules("Protection profile changed")
         return self.get_state()
 
     def admin_access(self, password=""):
-        if self.current_profile == "child_protection" and self.profile_password and password != self.profile_password:
+        if self.current_profile == "child_protection" and self.profile_password and not verify_profile_password(password, self.profile_password):
             raise PermissionError("The admin password is incorrect.")
         return {
             "profile": self.current_profile,
@@ -2201,14 +2287,14 @@ class DesktopApi:
         }
 
     def set_profile_password(self, current_password, new_password):
-        if self.profile_password and current_password != self.profile_password:
+        if self.profile_password and not verify_profile_password(current_password, self.profile_password):
             raise PermissionError("The current admin password is incorrect.")
-        self.profile_password = new_password.strip()
+        self.profile_password = hash_profile_password(new_password.strip())
         self._save_rules("Admin password settings changed")
         return self.get_state()
 
     def restore_admin(self, password=""):
-        if self.profile_password and password != self.profile_password:
+        if self.profile_password and not verify_profile_password(password, self.profile_password):
             raise PermissionError("The admin password is incorrect.")
         self.current_profile = "default"
         self._save_rules("Admin mode restored")
