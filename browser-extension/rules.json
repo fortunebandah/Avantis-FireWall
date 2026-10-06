@@ -79,21 +79,5 @@
       "urgent payment",
       "verify account"
     ]
-  },
-  "subdomain_prefixes": [
-    "www",
-    "info",
-    "m",
-    "mobile",
-    "login",
-    "account",
-    "sports",
-    "casino",
-    "bet",
-    "api",
-    "app",
-    "play"
-  ],
-  "protection_profile": "default",
-  "profile_password": ""
+  }
 }

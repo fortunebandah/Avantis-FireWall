@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import logo from '../../Images/Avantis-logo-prl.png'
 import {
-  Activity, AlertTriangle, ArrowDownToLine, ArrowRight, Check, ChevronDown,
+  Activity, AlertTriangle, ArrowRight, Check, ChevronDown,
   CircleHelp, Clock3, FileUp, Fingerprint, Gauge, Globe2, KeyRound, ListFilter,
   LockKeyhole, Plus, Search, Shield, ShieldAlert, ShieldCheck, Trash2, Upload,
   X,
@@ -21,7 +21,7 @@ const retentionOptions = [
 ]
 
 function App() {
-  const [apiReady, setApiReady] = useState(Boolean(window.pywebview?.api))
+  const [apiReady, setApiReady] = useState(typeof window.pywebview?.api?.get_state === 'function')
   const [bridgeTimedOut, setBridgeTimedOut] = useState(false)
   const [state, setState] = useState(null)
   const [startupError, setStartupError] = useState('')
@@ -47,7 +47,7 @@ function App() {
 
   useEffect(() => {
     const ready = () => {
-      if (window.pywebview?.api) {
+      if (typeof window.pywebview?.api?.get_state === 'function') {
         setApiReady(true)
         setBridgeTimedOut(false)
         window.clearInterval(pollId)
@@ -72,7 +72,7 @@ function App() {
 
   useEffect(() => {
     if (!toast) return
-    const timeout = window.setTimeout(() => setToast(null), 3600)
+    const timeout = window.setTimeout(() => setToast(null), 5000)
     return () => window.clearTimeout(timeout)
   }, [toast])
 
@@ -162,6 +162,7 @@ function App() {
       async (value) => {
         setAnalysis(value)
         await refreshState()
+        if (value.domain) setToast({ type: 'success', message: 'Website check completed.' })
       },
     )
     if (result && !result.domain) setToast({ type: 'error', message: 'Enter a valid website or domain.' })
@@ -294,12 +295,27 @@ function App() {
     )
   }
 
-  async function exportFeed() {
+  async function importPolicy() {
+    const confirmed = await ask('Replace the current policy?', 'The selected policy will replace the current domains, categories, and subdomain prefixes. A restore point will be created first.', { confirm: true, confirmLabel: 'Choose policy file' })
+    if (!confirmed) return
+    const password = await writePassword('import a policy in Safe Mode')
+    if (password === null) return
     await perform(
-      () => window.pywebview.api.export_dns_feed(),
+      () => window.pywebview.api.import_policy(password),
       null,
-      (result) => setToast({ type: result.cancelled ? 'info' : 'success', message: result.cancelled ? 'Export cancelled.' : `${result.count} domains exported.` }),
+      (result) => {
+        setState(result.state)
+        setToast({ type: result.cancelled ? 'info' : 'success', message: result.cancelled ? 'Policy import cancelled.' : 'Policy imported. Previous rules are available in Policy history.' })
+      },
     )
+  }
+
+  async function restorePolicy(snapshotId) {
+    const confirmed = await ask('Restore this policy version?', 'The current policy will be saved in history before this version is restored.', { confirm: true, confirmLabel: 'Restore version' })
+    if (!confirmed) return
+    const password = await writePassword('restore a policy in Safe Mode')
+    if (password === null) return
+    await perform(() => window.pywebview.api.restore_policy_version(snapshotId, password), 'Previous policy restored.')
   }
 
   async function changeRetention(hours) {
@@ -445,7 +461,6 @@ function App() {
                     <button className="button button-outline" onClick={() => refreshState().then(() => setToast({ type: 'success', message: 'Hosts file status refreshed.' })).catch(showError)} disabled={busy}><Activity size={15} /> Check status</button>
                     <button className="button button-primary" onClick={applyHosts} disabled={busy}><ShieldCheck size={16} /> Apply to Hosts</button>
                     <button className="button button-outline" onClick={removeHosts} disabled={busy}><Trash2 size={15} /> Remove rules</button>
-                    <button className="button button-outline" onClick={exportFeed} disabled={busy}><ArrowDownToLine size={15} /> Export DNS feed</button>
                   </div>
                 </div>
               </section>}
@@ -479,7 +494,7 @@ function App() {
           {page === 'insights' && <>
             <PageTitle eyebrow="LOCAL ACTIVITY & CONFIGURATION" title="Insights & rules" description="Review manual checks, search your current dictionary, and refine detection rules." />
             <div className="insight-tabs" role="tablist">
-              {[['activity', 'Activity', Activity], ['dictionary', 'Dictionary', Search], ['rules', 'Rule library', ListFilter]].map(([id, label, Icon]) => <button key={id} className={insightTab === id ? 'selected' : ''} role="tab" aria-selected={insightTab === id} onClick={() => setInsightTab(id)}><Icon size={15} />{label}</button>)}
+              {[['activity', 'Activity', Activity], ['dictionary', 'Dictionary', Search], ['rules', 'Rule library', ListFilter], ['admin', 'Administration', ShieldCheck]].map(([id, label, Icon]) => <button key={id} className={insightTab === id ? 'selected' : ''} role="tab" aria-selected={insightTab === id} onClick={() => setInsightTab(id)}><Icon size={15} />{label}</button>)}
             </div>
             {insightTab === 'activity' && <section className="surface insights-surface">
               <div className="list-toolbar"><div><h2>Activity</h2></div><label className="retention-select"><span>Keep for</span><select value={state.activity.retention_hours} onChange={(event) => changeRetention(Number(event.target.value))}>{retentionOptions.map((option) => <option key={option.hours} value={option.hours}>{option.label}</option>)}</select></label></div>
@@ -498,11 +513,26 @@ function App() {
               <div className="rule-editor"><label>Category<input value={newCategory} onChange={(event) => setNewCategory(event.target.value)} placeholder="e.g. gambling" /></label><label>Keyword or phrase<input value={newKeyword} onChange={(event) => setNewKeyword(event.target.value)} placeholder="e.g. betting" onKeyDown={(event) => event.key === 'Enter' && addRule()} /></label><button className="button button-primary" onClick={addRule} disabled={busy || !newCategory.trim() || !newKeyword.trim()}><Plus size={15} /> Add rule</button></div>
               <div className="table-foot"><span>{visibleRules.length} rules shown</span><button className="text-button danger-text" onClick={removeRules} disabled={busy || !selectedRules.length}><Trash2 size={14} /> Remove selected{selectedRules.length ? ` (${selectedRules.length})` : ''}</button></div>
             </section>}
+            {insightTab === 'admin' && <section className="surface insights-surface administration-surface">
+              <div className="list-toolbar administration-toolbar"><div><h2>Local policy administration</h2><p>Settings and administrative records stay on this device.</p></div><div className="administration-actions"><button className="button button-outline" onClick={importPolicy} disabled={busy}>Import policy</button></div></div>
+              <div className="administration-section">
+                <div className="administration-heading"><h3>Policy history</h3><span>Previous rule sets are saved before policy changes.</span></div>
+                <div className="administration-list">{(state.policy_history || []).map((version) => <div className="administration-row" key={version.id}><div className="administration-row-main"><strong>{version.action}</strong><span>{version.domain_count} domains · {version.rule_count} detection rules</span></div><time>{new Date(version.timestamp).toLocaleString()}</time><button className="button button-quiet" onClick={() => restorePolicy(version.id)} disabled={busy}>Restore</button></div>)}{!(state.policy_history || []).length && <div className="empty-state"><strong>No previous policy versions</strong><span>A restore point appears after the first rule change.</span></div>}</div>
+              </div>
+              <div className="administration-section">
+                <div className="administration-heading"><h3>Administrative audit</h3><span>Configuration and hosts actions only; website visits are not recorded here.</span></div>
+                <div className="administration-list">{[...(state.admin_audit || [])].reverse().map((event, index) => <div className="audit-row" key={`${event.timestamp}-${index}`}><time>{new Date(event.timestamp).toLocaleString()}</time><strong>{event.action}</strong><span>{event.detail}</span></div>)}{!(state.admin_audit || []).length && <div className="empty-state"><strong>No administrative actions recorded</strong><span>Policy changes and hosts operations will appear here.</span></div>}</div>
+              </div>
+            </section>}
           </>}
         </div>
       </main>
 
-      {toast && <div className={`toast ${toast.type}`} role="status"><span className="toast-mark">{toast.type === 'success' ? <Check size={16} /> : toast.type === 'error' ? <AlertTriangle size={16} /> : <CircleHelp size={16} />}</span><span>{toast.message}</span><button onClick={() => setToast(null)} aria-label="Dismiss notification"><X size={15} /></button></div>}
+      {toast && <div className={`toast ${toast.type}`} role={toast.type === 'error' ? 'alert' : 'status'} aria-live={toast.type === 'error' ? 'assertive' : 'polite'} aria-atomic="true">
+        <span className="toast-mark">{toast.type === 'success' ? <Check size={17} /> : toast.type === 'error' ? <AlertTriangle size={17} /> : <CircleHelp size={17} />}</span>
+        <span className="toast-content"><strong>{toast.type === 'success' ? 'Action complete' : toast.type === 'error' ? 'Action needs attention' : 'Notice'}</strong><span>{toast.message}</span></span>
+        <button onClick={() => setToast(null)} aria-label="Dismiss notification"><X size={16} /></button>
+      </div>}
       {adminPanel && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setAdminPanel(false)}><section className="admin-panel"><div className="admin-panel-heading"><div className="modal-icon"><LockKeyhole size={19} /></div><button className="icon-button" onClick={() => setAdminPanel(false)} aria-label="Close admin access"><X size={16} /></button></div><h2>Admin access</h2><p>Review Safe Mode and manage the access controls for this device.</p><div className="admin-stats"><div><small>PROFILE</small><strong>Safe Mode</strong></div><div><small>PASSWORD</small><strong>{state.has_profile_password ? 'Enabled' : 'Disabled'}</strong></div><div><small>BLOCKED</small><strong>{state.blocked_domains.length}</strong></div></div><div className="admin-actions"><button className="button button-outline" onClick={setPassword}><KeyRound size={15} /> Set / change password</button><button className="button button-primary" onClick={restoreAdmin}><ShieldCheck size={15} /> Restore Admin</button></div><div className="admin-note">Only the admin password can turn off Safe Mode and restore Admin mode.</div></section></div>}
       {modal && <Modal modal={modal} onClose={closeModal} />}
     </div>

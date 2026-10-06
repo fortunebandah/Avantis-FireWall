@@ -16,9 +16,9 @@ The desktop **Check URL** tool also performs local explainable analysis. It can 
 
 Review the list before applying it on a shared work computer. The rules remain active after Avantis FireWall closes.
 
-Before the first update, Avantis creates `hosts.avantis.backup` beside the application. It also writes through a temporary file so an interrupted update does not leave a half-written hosts file. Use **Remove Hosts Rules** to remove only the entries managed by Avantis and leave other hosts-file entries alone.
+Before the first update, Avantis creates `hosts.avantis.backup` in its local data folder. It also writes through a temporary file so an interrupted update does not leave a half-written hosts file. Use **Remove Hosts Rules** to remove only the entries managed by Avantis and leave other hosts-file entries alone.
 
-For enterprise-sized feeds, use **Protect → Export DNS Feed** and load the resulting one-domain-per-line file into managed DNS, a filtering gateway, or device policy. Avantis limits the Windows hosts writer to 1,000 domains because each domain expands into multiple hostnames and sinkhole entries; putting thousands of domains in every laptop hosts file is slower and more likely to be locked by endpoint security.
+Avantis limits the Windows hosts writer to 1,000 domains because each domain expands into multiple hostnames and sinkhole entries; putting thousands of domains in every laptop hosts file is slower and more likely to be locked by endpoint security. Use a managed DNS service for larger lists or organization-wide filtering.
 
 ## 2. Managed DNS filtering
 
