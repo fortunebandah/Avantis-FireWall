@@ -9,6 +9,7 @@ Avantis FireWall is a rule-based website blocker for Windows. Create a focused l
 - Check an address with local, explainable risk indicators.
 - Edit detection categories, review activity, and manage a protected Safe Mode profile.
 - Keep your rules and activity on this PC.
+- Store the Safe Mode password as a salted PBKDF2 hash instead of readable text.
 
 Protection applies to listed domains and their configured common subdomains across browsers and Windows accounts on this PC. A link hosted on a different domain must be added separately. Applying or removing protection requires Windows Administrator approval and changes which websites can be accessed on this PC.
 
@@ -36,7 +37,7 @@ To package a Windows installer, install Inno Setup 6 or newer and run:
 .\build_windows.ps1
 ```
 
-The installer is created at `dist\installer\AvantisFireWall-Setup-1.0.1.exe`. Use `.\build_windows.ps1 -SkipInstaller` to build just the application bundle.
+The installer is created at `dist\installer\AvantisFireWall-Setup-1.0.0.exe`. Use `.\build_windows.ps1 -SkipInstaller` to build just the application bundle.
 
 ## Your information
 
@@ -56,3 +57,5 @@ When running from source, edit `rules.json` while the app is closed. Add website
 ```
 
 In the app, manage domains under **Blocked domains** and detection terms under **Insights & rules**. Saved changes take effect on this PC when you select **Apply protection**.
+
+Existing plain-text Safe Mode passwords are automatically converted to a salted password hash when the app loads the settings. The hash cannot be used to recover the original password.
