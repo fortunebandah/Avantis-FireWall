@@ -72,21 +72,21 @@ function App() {
 
   useEffect(() => {
     if (!toast) return
-    const timeout = window.setTimeout(() => setToast(null), 5000)
+    const timeout = window.setTimeout(() => setToast(null), 6000)
     return () => window.clearTimeout(timeout)
   }, [toast])
 
   const safeMode = state?.protection_profile === 'child_protection'
-  const hostsStatusMessage = state?.hosts_status?.[0] || ''
-  const hostsStatusLevel = state?.hosts_status?.[1] || 'warning'
-  const hostsActive = /\d+ Avantis hostnames in \d+ mappings\./.test(hostsStatusMessage)
-  const hostsStatusLabel = hostsActive
-    ? 'Hosts protection active'
-    : hostsStatusLevel === 'error'
-      ? 'Hosts file unavailable'
-      : hostsStatusMessage.includes('Incomplete Avantis markers')
-        ? 'Hosts file needs review'
-        : 'Hosts rules not applied'
+  const protectionStatusMessage = state?.hosts_status?.[0] || ''
+  const protectionStatusLevel = state?.hosts_status?.[1] || 'warning'
+  const protectionActive = /\d+ Avantis hostnames in \d+ mappings\./.test(protectionStatusMessage)
+  const protectionStatusLabel = protectionActive
+    ? 'Protection active'
+    : protectionStatusLevel === 'error'
+      ? 'Check protection'
+      : protectionStatusMessage.includes('Incomplete Avantis markers')
+        ? 'Review protection'
+        : 'Protection not applied'
   const hiddenPages = safeMode ? pages.filter((item) => item.id === 'protect') : pages
   const shownDomains = (state?.blocked_domains || []).filter((domain) => domain.includes(domainQuery.trim().toLowerCase()))
 
@@ -115,7 +115,17 @@ function App() {
     setToast({ type: 'error', message: error?.message || String(error) })
   }
 
-  async function perform(action, successMessage, onSuccess) {
+  function showProtectionError(error) {
+    const message = error?.message || String(error)
+    setToast({
+      type: 'error',
+      message: /cancel|denied|administrator approval/i.test(message)
+        ? 'Administrator approval was not granted. Protection was not changed.'
+        : 'Protection could not be updated. Check administrator permissions and try again.',
+    })
+  }
+
+  async function perform(action, successMessage, onSuccess, onError = showError) {
     setBusy(true)
     try {
       const result = await action()
@@ -126,7 +136,7 @@ function App() {
       if (successMessage) setToast({ type: 'success', message: successMessage })
       return result
     } catch (error) {
-      showError(error)
+      onError(error)
       return null
     } finally {
       setBusy(false)
@@ -277,21 +287,23 @@ function App() {
       null,
       async (result) => {
         await refreshState()
-        setToast({ type: result.flushed ? 'success' : 'error', message: result.flushed ? 'Hosts protection applied and DNS cache flushed.' : `Hosts protection applied, but DNS cache flush failed: ${result.error}` })
+        setToast({ type: result.flushed ? 'success' : 'error', message: result.flushed ? 'Website protection is active on this PC.' : 'Protection rules were applied, but Windows could not refresh access yet. Restart your browser or try again.' })
       },
+      showProtectionError,
     )
   }
 
   async function removeHosts() {
-    const confirmed = await ask('Remove Avantis hosts rules?', 'Only the Avantis-managed section will be removed from the Windows hosts file.', { confirm: true, confirmLabel: 'Remove rules' })
+    const confirmed = await ask('Remove website protection?', 'This removes the website restrictions managed by Avantis from this PC. Domains covered by those rules may become accessible again. Administrator approval is required.', { confirm: true, confirmLabel: 'Remove protection' })
     if (!confirmed) return
     await perform(
       () => window.pywebview.api.remove_hosts(),
       null,
       async (result) => {
         await refreshState()
-        setToast({ type: result.flushed ? 'success' : 'error', message: result.removed ? (result.flushed ? 'Avantis hosts rules removed.' : `Rules removed; DNS flush failed: ${result.error}`) : 'No Avantis hosts rules were found.' })
+        setToast({ type: result.flushed ? 'success' : 'error', message: result.removed ? (result.flushed ? 'Avantis website protection was removed from this PC.' : 'Protection was removed, but Windows could not refresh access yet. Restart your browser or try again.') : 'There were no Avantis website restrictions to remove.' })
       },
+      showProtectionError,
     )
   }
 
@@ -403,7 +415,7 @@ function App() {
         <header className="topbar">
           <div className="breadcrumbs"><strong>{pages.find((item) => item.id === page)?.label}</strong></div>
           <div className="top-actions">
-            <span className={`connection ${hostsActive ? 'active' : hostsStatusLevel === 'error' ? 'error' : 'idle'}`}>{hostsStatusLabel}</span>
+            <span className={`connection ${protectionActive ? 'active' : protectionStatusLevel === 'error' ? 'error' : 'idle'}`}>{protectionStatusLabel}</span>
             {safeMode ? (
               <button className="button button-quiet" onClick={openAdminAccess}><KeyRound size={15} /> Admin access</button>
             ) : (
@@ -416,7 +428,7 @@ function App() {
           {page === 'protect' && (
             <>
               <div className="page-heading">
-                <div><h1>Protection</h1><p>Check a site or review your block list.</p></div>
+                <div><h1>Protection</h1><p>A rule-based website blocker. Check a site or manage this PC’s website protection.</p></div>
                 <div className={`profile-select ${safeMode ? 'safe' : ''}`}>
                   <div><strong>{safeMode ? 'Safe Mode' : 'Admin'}</strong></div>
                   <select aria-label="Protection profile" value={state.protection_profile} onChange={(event) => changeProfile(event.target.value)}>
@@ -444,7 +456,7 @@ function App() {
 
                 {!safeMode && <section className="surface quick-add">
                   <div className="section-heading"><div><h2>Block a domain</h2></div></div>
-                  <p className="section-copy">It will be blocked in Windows after you select Apply to Hosts.</p>
+                  <p className="section-copy">The domain will be blocked on this PC after you apply protection.</p>
                   <form className="stack-form" onSubmit={(event) => { event.preventDefault(); addDomains(addInput, () => setAddInput('')) }}>
                     <input value={addInput} onChange={(event) => setAddInput(event.target.value)} placeholder="domain.com" aria-label="Domain to block" />
                     <button className="button button-primary" disabled={busy}><Plus size={16} /> Add domain</button>
@@ -454,17 +466,21 @@ function App() {
               </div>
 
               {!safeMode && <section className="surface hosts-panel">
-                <div className="section-heading hosts-heading"><div><h2>Block sites on this PC</h2></div><StatusPill status={state.hosts_status} /></div>
+                <div className="section-heading hosts-heading"><div><h2>Device protection</h2></div><StatusPill status={state.hosts_status} /></div>
                 <div className="hosts-controls">
-                  <div className="hosts-explainer"><strong>Windows block list</strong><span>Only Avantis entries are changed. Administrator permission is required.</span></div>
+                  <div className="hosts-explainer"><strong>Website restrictions for this PC</strong><span>Applies across browsers and Windows accounts on this PC. Administrator approval is required.</span></div>
                   <div className="button-row">
-                    <button className="button button-outline" onClick={() => refreshState().then(() => setToast({ type: 'success', message: 'Hosts file status refreshed.' })).catch(showError)} disabled={busy}><Activity size={15} /> Check status</button>
-                    <button className="button button-primary" onClick={applyHosts} disabled={busy}><ShieldCheck size={16} /> Apply to Hosts</button>
-                    <button className="button button-outline" onClick={removeHosts} disabled={busy}><Trash2 size={15} /> Remove rules</button>
+                    <button className="button button-outline" onClick={() => refreshState().then((next) => {
+                      const message = next.hosts_status?.[0] || ''
+                      const isActive = /\d+ Avantis hostnames in \d+ mappings\./.test(message)
+                      setToast({ type: 'success', message: `Protection status checked: ${isActive ? 'active' : 'not applied'}.` })
+                    }).catch(showError)} disabled={busy}><Activity size={15} /> Check status</button>
+                    <button className="button button-primary" onClick={applyHosts} disabled={busy}><ShieldCheck size={16} /> Apply protection</button>
+                    <button className="button button-outline" onClick={removeHosts} disabled={busy}><Trash2 size={15} /> Remove protection</button>
                   </div>
                 </div>
               </section>}
-              {safeMode && <section className="safe-banner"><div><strong>Safe Mode is active</strong><span>An admin must unlock this profile to edit settings or change Windows protection.</span></div><button onClick={openAdminAccess}>Admin access</button></section>}
+              {safeMode && <section className="safe-banner"><div><strong>Safe Mode is active</strong><span>An admin must unlock this profile to edit settings or change this PC’s website protection.</span></div><button onClick={openAdminAccess}>Admin access</button></section>}
             </>
           )}
 
@@ -475,7 +491,7 @@ function App() {
               <p className="section-copy">Separate domains with new lines, commas, semicolons, or spaces.</p>
               <textarea value={bulkInput} onChange={(event) => setBulkInput(event.target.value)} placeholder={'example.com\nsubdomain.example.net'} aria-label="Domains to import" />
               <div className="import-footer"><span>{bulkInput.trim() ? bulkInput.trim().split(/[\s,;]+/).filter(Boolean).length : 0} entries detected</span><div className="button-row"><button className="button button-outline" onClick={importFile} disabled={busy}><Upload size={15} /> Import file</button><button className="button button-primary" disabled={busy || !bulkInput.trim()} onClick={() => addDomains(bulkInput, () => setBulkInput(''))}><Plus size={16} /> Add all</button></div></div>
-              <div className="signal-note"><CircleHelp size={16} /><span>Supported files: TXT, CSV, JSON, and DOCX. Imported entries are saved locally; hosts rules change only after an explicit Apply.</span></div>
+              <div className="signal-note"><CircleHelp size={16} /><span>Supported files: TXT, CSV, JSON, and DOCX. Imported entries are saved locally; website protection changes only when you choose Apply protection.</span></div>
             </section>
           </>}
 
@@ -487,7 +503,7 @@ function App() {
                 {shownDomains.map((domain) => <tr key={domain}><td><input type="checkbox" aria-label={`Select ${domain}`} checked={selectedDomains.includes(domain)} onChange={(event) => setSelectedDomains((current) => event.target.checked ? [...current, domain] : current.filter((item) => item !== domain))} /></td><td className="domain-name"><Globe2 size={15} />{domain}</td><td><span className="rule-label">Domain + subdomains</span></td><td><span className="table-status"><i /> Saved locally</span></td></tr>)}
                 {!shownDomains.length && <tr><td colSpan="4" className="empty-row">{domainQuery ? 'No domains match your filter.' : 'Your block list is empty.'}</td></tr>}
               </tbody></table></div>
-              <div className="table-foot"><span>Showing {shownDomains.length} of {state.blocked_domains.length}</span><span>Rules are not applied until you select Apply to Hosts.</span></div>
+              <div className="table-foot"><span>Showing {shownDomains.length} of {state.blocked_domains.length}</span><span>Website restrictions update when you apply protection.</span></div>
             </section>
           </>}
 
@@ -520,8 +536,8 @@ function App() {
                 <div className="administration-list">{(state.policy_history || []).map((version) => <div className="administration-row" key={version.id}><div className="administration-row-main"><strong>{version.action}</strong><span>{version.domain_count} domains · {version.rule_count} detection rules</span></div><time>{new Date(version.timestamp).toLocaleString()}</time><button className="button button-quiet" onClick={() => restorePolicy(version.id)} disabled={busy}>Restore</button></div>)}{!(state.policy_history || []).length && <div className="empty-state"><strong>No previous policy versions</strong><span>A restore point appears after the first rule change.</span></div>}</div>
               </div>
               <div className="administration-section">
-                <div className="administration-heading"><h3>Administrative audit</h3><span>Configuration and hosts actions only; website visits are not recorded here.</span></div>
-                <div className="administration-list">{[...(state.admin_audit || [])].reverse().map((event, index) => <div className="audit-row" key={`${event.timestamp}-${index}`}><time>{new Date(event.timestamp).toLocaleString()}</time><strong>{event.action}</strong><span>{event.detail}</span></div>)}{!(state.admin_audit || []).length && <div className="empty-state"><strong>No administrative actions recorded</strong><span>Policy changes and hosts operations will appear here.</span></div>}</div>
+                <div className="administration-heading"><h3>Administrative audit</h3><span>Policy and device-protection actions only; website visits are not recorded here.</span></div>
+                <div className="administration-list">{[...(state.admin_audit || [])].reverse().map((event, index) => <div className="audit-row" key={`${event.timestamp}-${index}`}><time>{new Date(event.timestamp).toLocaleString()}</time><strong>{displayAuditAction(event.action)}</strong><span>{displayAuditDetail(event.detail)}</span></div>)}{!(state.admin_audit || []).length && <div className="empty-state"><strong>No administrative actions recorded</strong><span>Policy changes and device-protection actions will appear here.</span></div>}</div>
               </div>
             </section>}
           </>}
@@ -548,12 +564,25 @@ function PageTitle({ title, description }) {
 }
 
 function StatusPill({ status }) {
-  const [message, level] = status || ['Hosts status unavailable.', 'warning']
+  const [message, level] = status || ['Protection status unavailable.', 'warning']
   const active = /\d+ Avantis hostnames in \d+ mappings\./.test(message)
   const idle = message.includes('No Avantis-managed rules found')
   const statusClass = level === 'error' ? 'error' : active ? 'active' : idle ? 'idle' : 'warning'
-  const label = active ? 'Rules active' : idle ? 'Not applied' : 'Check needed'
+  const label = active ? 'Protection active' : idle ? 'Not applied' : 'Check needed'
   return <span className={`status-pill ${statusClass}`}>{label}</span>
+}
+
+function displayAuditAction(action) {
+  if (action === 'Hosts protection applied') return 'Website protection applied'
+  if (action === 'Hosts protection removed') return 'Website protection removed'
+  return action
+}
+
+function displayAuditDetail(detail) {
+  if (detail.includes('blocked domains applied')) return 'Website rules were applied to this PC.'
+  if (detail.includes('Avantis hosts rules were removed')) return 'Avantis website restrictions were removed from this PC.'
+  if (detail.includes('No Avantis hosts rules were present')) return 'No Avantis website restrictions were active.'
+  return detail
 }
 
 function AnalysisResult({ result }) {

@@ -581,18 +581,17 @@ def render_admin_report(report):
     categories = policy.get("categories", {})
     domains = policy.get("blocked_domains", [])
     prefixes = policy.get("subdomain_prefixes", [])
-    hosts_message, hosts_level = report.get("hosts_status", ["Status unavailable", "warning"])
+    protection_message, protection_level = report.get("hosts_status", ["Status unavailable", "warning"])
     activity = report.get("manual_check_activity", {})
     activity_events = activity.get("events", [])
     history = report.get("policy_history", [])
     audit = report.get("admin_audit", [])
     rule_count = sum(len(words) for words in categories.values() if isinstance(words, list))
-    hosts_active = re.search(r"\d+ Avantis hostnames in \d+ mappings\.", str(hosts_message)) is not None
-    status_label = "Active" if hosts_active else {"success": "Healthy", "warning": "Check recommended", "error": "Unavailable"}.get(hosts_level, "Status unavailable")
+    protection_message, status_label = protection_status_for_display(protection_message, protection_level)
 
     category_rows = [(category.replace("_", " ").title(), ", ".join(words)) for category, words in sorted(categories.items())]
     activity_rows = [(timestamp(event.get("timestamp")), event.get("domain"), event.get("detail")) for event in reversed(activity_events)]
-    audit_rows = [(timestamp(event.get("timestamp")), event.get("action"), event.get("detail")) for event in reversed(audit)]
+    audit_rows = [(timestamp(event.get("timestamp")), format_audit_action(event.get("action", "")), format_audit_detail(event.get("detail", ""))) for event in reversed(audit)]
     history_rows = [(timestamp(version.get("timestamp")), version.get("action"), f"{version.get('domain_count', 0)} domains; {version.get('rule_count', 0)} detection rules") for version in reversed(history)]
     generated = timestamp(report.get("generated_at"))
 
@@ -633,7 +632,7 @@ def render_admin_report(report):
 <body>
   <main>
     <header><p class="eyebrow">AVANTIS FIREWALL · ADMINISTRATION</p><h1>Protection report</h1><p>Generated {text(generated)}</p></header>
-    <section><h2>At a glance</h2><div class="summary"><div class="metric"><span>Protection profile</span><strong>{text(policy.get('protection_profile', 'Unknown').replace('_', ' ').title())}</strong></div><div class="metric"><span>Blocked domains</span><strong>{len(domains)}</strong></div><div class="metric"><span>Detection rules</span><strong>{rule_count}</strong></div><div class="metric"><span>Windows hosts status</span><strong>{text(status_label)}</strong></div></div><p class="note">{text(hosts_message)}</p></section>
+    <section><h2>At a glance</h2><div class="summary"><div class="metric"><span>Protection profile</span><strong>{text(policy.get('protection_profile', 'Unknown').replace('_', ' ').title())}</strong></div><div class="metric"><span>Blocked domains</span><strong>{len(domains)}</strong></div><div class="metric"><span>Detection rules</span><strong>{rule_count}</strong></div><div class="metric"><span>Device protection</span><strong>{text(status_label)}</strong></div></div><p class="note">{text(protection_message)}</p></section>
     <section><h2>Blocked domains</h2>{table(['Domain'], [(domain,) for domain in domains], 'No blocked domains are configured.')}</section>
     <section><h2>Detection rules</h2>{table(['Category', 'Configured terms'], category_rows, 'No detection categories are configured.')}</section>
     <section><h2>Subdomain coverage</h2><p class="prefixes">{text(', '.join(prefixes) if prefixes else 'No subdomain prefixes configured.')}</p></section>
@@ -645,6 +644,36 @@ def render_admin_report(report):
 </body>
 </html>
 """
+
+
+def protection_status_for_display(message, level):
+    message = str(message or "")
+    if re.search(r"\d+ Avantis hostnames in \d+ mappings\.", message):
+        return "Website restrictions are active across this PC.", "Active"
+    if "No Avantis-managed rules found" in message:
+        return "Website restrictions are not currently applied.", "Not applied"
+    if level == "error":
+        return "Protection status could not be checked. Confirm Administrator approval and try again.", "Check needed"
+    return "Protection status needs review. Confirm Administrator approval and check again.", "Review needed"
+
+
+def format_audit_action(action):
+    if action == "Hosts protection applied":
+        return "Website protection applied"
+    if action == "Hosts protection removed":
+        return "Website protection removed"
+    return action
+
+
+def format_audit_detail(detail):
+    detail = str(detail or "")
+    if "blocked domains applied" in detail:
+        return "Website rules were applied to this PC."
+    if "Avantis hosts rules were removed" in detail:
+        return "Avantis website restrictions were removed from this PC."
+    if "No Avantis hosts rules were present" in detail:
+        return "No Avantis website restrictions were active."
+    return detail
 
 
 def inspect_hosts_rules():
@@ -1113,13 +1142,13 @@ class BlockerApp(tk.Tk):
         host_frame = self.host_frame
         host_frame.pack(fill="x")
         ttk.Label(host_frame, text="Protection controls", style="Panel.TLabel", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        ttk.Label(host_frame, text="Apply or remove only Avantis-managed hosts rules. Administrator permission is required.", style="Muted.TLabel").pack(anchor="w", pady=(2, 10))
+        ttk.Label(host_frame, text="Apply or remove Avantis website restrictions. Administrator approval is required.", style="Muted.TLabel").pack(anchor="w", pady=(2, 10))
         host_buttons = ttk.Frame(host_frame, style="Panel.TFrame")
         host_buttons.pack(fill="x")
-        ttk.Button(host_buttons, text="Apply to Hosts", command=self.apply_blocking, style="Accent.TButton").pack(side="left", padx=(0, 8))
-        ttk.Button(host_buttons, text="Remove Hosts Rules", command=self.remove_blocking, style="Secondary.TButton").pack(side="left", padx=(0, 8))
-        ttk.Button(host_buttons, text="Check Hosts File", command=self.refresh_hosts_status, style="Secondary.TButton").pack(side="left")
-        self.hosts_status_label = ttk.Label(host_frame, text="Hosts file check not run.", style="Muted.TLabel", wraplength=800)
+        ttk.Button(host_buttons, text="Apply Protection", command=self.apply_blocking, style="Accent.TButton").pack(side="left", padx=(0, 8))
+        ttk.Button(host_buttons, text="Remove Protection", command=self.remove_blocking, style="Secondary.TButton").pack(side="left", padx=(0, 8))
+        ttk.Button(host_buttons, text="Check Status", command=self.refresh_hosts_status, style="Secondary.TButton").pack(side="left")
+        self.hosts_status_label = ttk.Label(host_frame, text="Protection status has not been checked.", style="Muted.TLabel", wraplength=800)
         self.hosts_status_label.pack(anchor="w", pady=(10, 0))
 
         self.overview = ttk.Frame(protect_tab, style="App.TFrame")
@@ -1137,7 +1166,7 @@ class BlockerApp(tk.Tk):
         self.domain_stat_label = ttk.Label(domain_card, text="0", style="CardValue.TLabel")
         self.domain_stat_label.pack(anchor="w")
         ttk.Label(domain_card, text="BLOCKED DOMAINS", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 0))
-        ttk.Label(domain_card, text="Ready for hosts protection", style="CardNote.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(domain_card, text="Ready to apply website protection", style="CardNote.TLabel").pack(anchor="w", pady=(2, 0))
 
         rule_card = ttk.Frame(cards, style="Card.TFrame", padding=16)
         rule_card.grid(row=0, column=1, sticky="nsew", padx=8)
@@ -1174,7 +1203,7 @@ class BlockerApp(tk.Tk):
             self.bulk_text.edit_modified(False)
 
         self.bulk_text.bind("<<Modified>>", resize_bulk_input)
-        ttk.Label(bulk_frame, text="Imported domains are saved locally. Hosts rules change only after an explicit Apply.", style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
+        ttk.Label(bulk_frame, text="Imported domains are saved locally. Website protection changes only when you select Apply Protection.", style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
 
         list_frame = ttk.Frame(domains_tab, style="Panel.TFrame", padding=18)
         list_frame.pack(fill="both", expand=True)
@@ -1447,7 +1476,7 @@ class BlockerApp(tk.Tk):
         )
         if password == self.profile_password:
             return True
-        show_app_dialog(self, "Access blocked", "This profile is locked. Only the admin password can edit the hosts rules or block list.", "warning")
+        show_app_dialog(self, "Access blocked", "This profile is locked. Only the admin password can edit website protection or the block list.", "warning")
         return False
 
     def refresh_listbox(self):
@@ -1462,7 +1491,8 @@ class BlockerApp(tk.Tk):
 
     def refresh_hosts_status(self):
         status, state = inspect_hosts_rules()
-        self.hosts_status_label.config(text=status, style="Muted.TLabel" if state == "success" else "App.TLabel")
+        message, _status_label = protection_status_for_display(status, state)
+        self.hosts_status_label.config(text=message, style="Muted.TLabel" if state == "success" else "App.TLabel")
 
     def parse_domains(self, value, limit=None):
         domains = []
@@ -1889,60 +1919,60 @@ class BlockerApp(tk.Tk):
 
     def apply_blocking(self):
         if len(self.blocklist) > HOSTS_DOMAIN_LIMIT:
-            show_app_dialog(self, "Hosts list is too large", f"This list contains {len(self.blocklist)} domains. Windows hosts mode is limited to {HOSTS_DOMAIN_LIMIT} domains in Avantis to avoid slow DNS and security-tool locks. Use a managed DNS service for larger lists.", "warning")
+            show_app_dialog(self, "Block list is too large", f"This list contains {len(self.blocklist)} domains. Remove some domains to meet the {HOSTS_DOMAIN_LIMIT}-domain limit before applying protection.", "warning")
             return
 
         if not is_admin():
             try:
                 result = run_as_admin("apply")
                 self.refresh_hosts_status()
-                message = "The configured domains and common subdomains were added to the Windows hosts file."
+                message = "Website protection is active on this PC."
                 if not result["flushed"]:
-                    message += f"\n\nWindows could not flush its DNS cache: {result['error']}"
+                    message += "\n\nWindows could not refresh website access yet. Restart your browser or try again."
                 show_app_dialog(self, "Protection applied", message, "success" if result["flushed"] else "warning")
             except Exception as error:
-                show_app_dialog(self, "Could not apply protection", str(error), "error")
+                show_app_dialog(self, "Could not apply protection", "Protection could not be updated. Check Administrator permissions and try again.", "error")
             return
 
         try:
             write_hosts_file(self.blocklist, self.subdomain_prefixes)
             self.refresh_hosts_status()
             flushed, flush_error = flush_dns_cache()
-            message = "The configured domains and common subdomains were added to the Windows hosts file."
+            message = "Website protection is active on this PC."
             if not flushed:
-                message += f"\n\nWindows could not flush its DNS cache: {flush_error}\nClose and reopen Edge to clear its own cached lookups."
+                message += "\n\nWindows could not refresh website access yet. Restart your browser or try again."
             show_app_dialog(self, "Protection applied", message, "success" if flushed else "warning")
         except Exception as e:
             self.refresh_hosts_status()
-            show_app_dialog(self, "Could not apply protection", str(e), "error")
+            show_app_dialog(self, "Could not apply protection", "Protection could not be updated. Check Administrator permissions and try again.", "error")
 
     def remove_blocking(self):
-        if not show_app_dialog(self, "Remove hosts rules", "Remove only the Avantis FireWall rules from the Windows hosts file?", "warning", confirm=True):
+        if not show_app_dialog(self, "Remove website protection?", "This removes Avantis website restrictions from this PC. Domains covered by those rules may become accessible again. Administrator approval is required.", "warning", confirm=True):
             return
 
         if not is_admin():
             try:
                 result = run_as_admin("remove")
                 self.refresh_hosts_status()
-                message = "The Avantis FireWall hosts rules were removed." if result["removed"] else "No Avantis FireWall hosts rules were found."
+                message = "Avantis website protection was removed from this PC." if result["removed"] else "There were no Avantis website restrictions to remove."
                 if not result["flushed"]:
-                    message += f"\n\nWindows could not flush its DNS cache: {result['error']}"
+                    message += "\n\nWindows could not refresh website access yet. Restart your browser or try again."
                 show_app_dialog(self, "Protection removed", message, "success" if result["flushed"] else "warning")
             except Exception as error:
-                show_app_dialog(self, "Could not remove hosts rules", str(error), "error")
+                show_app_dialog(self, "Could not remove protection", "Protection could not be updated. Check Administrator permissions and try again.", "error")
             return
 
         try:
             removed = remove_hosts_rules()
             self.refresh_hosts_status()
             flushed, flush_error = flush_dns_cache()
-            message = "The Avantis FireWall hosts rules were removed." if removed else "No Avantis FireWall hosts rules were found."
+            message = "Avantis website protection was removed from this PC." if removed else "There were no Avantis website restrictions to remove."
             if not flushed:
-                message += f"\n\nWindows could not flush its DNS cache: {flush_error}\nThe hosts-file change succeeded; close and reopen Edge to clear its own cached lookups."
-            show_app_dialog(self, "Hosts rules removed" if removed else "Hosts rules checked", message, "success" if flushed else "warning")
+                message += f"\n\nWindows could not refresh website access yet: {flush_error}"
+            show_app_dialog(self, "Protection removed" if removed else "Protection status checked", message, "success" if flushed else "warning")
         except Exception as e:
             self.refresh_hosts_status()
-            show_app_dialog(self, "Could not remove hosts rules", str(e), "error")
+            show_app_dialog(self, "Could not remove protection", "Protection could not be updated. Check Administrator permissions and try again.", "error")
 
 class DesktopApi:
     def __init__(self):
@@ -2254,7 +2284,7 @@ class DesktopApi:
             raise ValueError(f"Windows hosts mode is limited to {HOSTS_DOMAIN_LIMIT} domains. Use a managed DNS service for larger lists.")
         write_hosts_file(self.blocklist, self.subdomain_prefixes)
         flushed, error = flush_dns_cache()
-        record_admin_audit("Hosts protection applied", f"{len(self.blocklist)} blocked domains applied.")
+        record_admin_audit("Website protection applied", f"{len(self.blocklist)} website rules applied.")
         return {"flushed": flushed, "error": error, "hosts_status": inspect_hosts_rules()}
 
     def remove_hosts(self):
@@ -2262,7 +2292,7 @@ class DesktopApi:
             return run_as_admin("remove")
         removed = remove_hosts_rules()
         flushed, error = flush_dns_cache()
-        record_admin_audit("Hosts protection removed", "Avantis hosts rules were removed." if removed else "No Avantis hosts rules were present.")
+        record_admin_audit("Website protection removed", "Avantis website restrictions were removed." if removed else "No Avantis website restrictions were active.")
         return {"removed": removed, "flushed": flushed, "error": error, "hosts_status": inspect_hosts_rules()}
 
 def main():
@@ -2332,9 +2362,9 @@ def show_first_run_agreement():
     policy_text.insert("end", "TERMS OF USE\n", "heading")
     policy_text.insert("end", "Use Avantis only on a device you own or are authorized to administer. Protection changes can affect everyone using this PC. You are responsible for choosing appropriate rules and complying with applicable law and workplace or family policies.\n\n")
     policy_text.insert("end", "HOW PROTECTION WORKS\n", "heading")
-    policy_text.insert("end", "Check a website runs local rule-based analysis and reports its findings; it does not change access. Blocking works by adding a domain to your blocklist and selecting Apply to Hosts. Avantis then writes the domain and its configured subdomain rules to this PC's Windows hosts file. The applied rules affect all browsers and Windows user accounts on this PC. A listed domain is blocked even if the site is legitimate or safe, and people using this PC cannot access it while its rule remains applied. Remove the domain and select Apply to Hosts again, or use Remove Rules, to restore access.\n\n")
+    policy_text.insert("end", "Check a website runs local rule-based analysis and reports its findings; it does not change access. Add a domain to your block list and select Apply Protection to restrict access to it and its configured common subdomains. Rules apply across browsers and Windows accounts on this PC. A listed domain may be blocked even if it is legitimate or safe. Remove the domain and apply the updated list, or select Remove Protection, to restore access.\n\n")
     policy_text.insert("end", "ADMINISTRATOR ACCESS\n", "heading")
-    policy_text.insert("end", "Avantis normally opens without administrator approval. Windows requests Administrator approval only when you choose to apply or remove hosts protection. Approve that prompt only if you are authorized to administer this PC. Applying or removing protection changes the Windows hosts file and can affect every user of this PC. Avantis changes only its own managed hosts-file entries.\n\n")
+    policy_text.insert("end", "Avantis normally opens without administrator approval. Windows requests Administrator approval only when you choose to apply or remove website protection. Approve that prompt only if you are authorized to administer this PC. Applying or removing protection changes website access for every user of this PC. You can remove Avantis protection from the app at any time.\n\n")
     policy_text.insert("end", "SAFE MODE AND PASSWORD\n", "heading")
     policy_text.insert("end", "Safe Mode is an optional restricted profile that limits editing and hides administration pages. When you first switch to Safe Mode without a password, Avantis asks you to create one. Use the Safe Mode password control to set or change it. When set, the password is required to unlock administrator controls or return to Admin mode. Choose a unique password and keep it available: it is stored locally with this PC's settings, is not an online account password, and is not included in exported policy files. Removing the password removes the password gate.\n\n")
     policy_text.insert("end", "PRIVACY NOTICE\n", "heading")
