@@ -23,16 +23,22 @@ WINDOWS_HOSTS_PATH = r"C:\Windows\System32\drivers\etc\hosts"
 APP_ROOT = Path(__file__).resolve().parent
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", APP_ROOT))
 LOCAL_APP_DATA = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+PROGRAM_DATA = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
 AGREEMENT_FILE = LOCAL_APP_DATA / "Avantis FireWall" / "agreement.json"
 AGREEMENT_VERSION = "1.3"
 APP_ICON_FILE = RESOURCE_ROOT / "Images" / "avantis-app.ico"
 if getattr(sys, "frozen", False) and os.name == "nt":
-    PROGRAM_DATA = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
     LEGACY_DATA_ROOT = PROGRAM_DATA / "Avantis FireWall"
     DATA_ROOT = LOCAL_APP_DATA / "Avantis FireWall"
 else:
     LEGACY_DATA_ROOT = None
     DATA_ROOT = APP_ROOT
+if os.name == "nt":
+    CENTRAL_DATA_ROOT = PROGRAM_DATA / "Avantis FireWall"
+else:
+    CENTRAL_DATA_ROOT = APP_ROOT
+CENTRAL_STATUS_FILE = CENTRAL_DATA_ROOT / "central-agent-status.json"
+CENTRAL_MANAGED_MARKER_FILE = CENTRAL_DATA_ROOT / "company-managed.json"
 HOSTS_BACKUP_PATH = DATA_ROOT / "hosts.avantis.backup"
 RULES_FILE = DATA_ROOT / "rules.json"
 ACTIVITY_FILE = DATA_ROOT / "activity.json"
@@ -240,6 +246,42 @@ def initialize_data_root():
         destination = DATA_ROOT / name
         if source.is_file() and not destination.exists():
             shutil.copy2(source, destination)
+
+
+def load_central_management_state():
+    if not CENTRAL_MANAGED_MARKER_FILE.is_file():
+        return None
+    try:
+        with CENTRAL_MANAGED_MARKER_FILE.open("r", encoding="utf-8") as source:
+            marker = json.load(source)
+    except (OSError, json.JSONDecodeError):
+        marker = {}
+    if not isinstance(marker, dict) or marker.get("managed") is not True:
+        marker = {}
+
+    try:
+        with CENTRAL_STATUS_FILE.open("r", encoding="utf-8") as source:
+            status = json.load(source)
+    except FileNotFoundError:
+        status = {}
+    except (OSError, json.JSONDecodeError) as error:
+        status = {"last_error": f"Could not read central status: {error}"}
+    if not isinstance(status, dict):
+        status = {"last_error": "Central status data is invalid."}
+    domains = status.get("blocked_domains", [])
+    prefixes = status.get("subdomain_prefixes", [])
+    return {
+        "managed": True,
+        "device_id": str(status.get("device_id") or marker.get("device_id") or ""),
+        "device_name": str(status.get("device_name") or marker.get("device_name") or ""),
+        "policy_version": max(0, status.get("policy_version", 0)) if isinstance(status.get("policy_version", 0), int) else 0,
+        "server_policy_version": max(0, status.get("server_policy_version", 0)) if isinstance(status.get("server_policy_version", 0), int) else 0,
+        "blocked_domains": [domain for domain in domains if isinstance(domain, str) and is_valid_domain(domain)] if isinstance(domains, list) else [],
+        "subdomain_prefixes": [prefix for prefix in prefixes if isinstance(prefix, str)] if isinstance(prefixes, list) else [],
+        "protection_status": str(status.get("protection_status") or "unknown"),
+        "last_check_in": str(status.get("last_check_in") or ""),
+        "last_error": str(status.get("last_error") or ""),
+    }
 
 
 def load_config():
@@ -2063,17 +2105,32 @@ class BlockerApp(tk.Tk):
 class DesktopApi:
     def __init__(self):
         config = load_config()
-        self.blocklist = [normalize_domain(item) for item in config["blocked_domains"] if str(item).strip()]
+        self.central_state = load_central_management_state()
+        self.blocklist = (
+            self.central_state["blocked_domains"]
+            if self.central_state
+            else [normalize_domain(item) for item in config["blocked_domains"] if str(item).strip()]
+        )
         self.categories = config["categories"]
-        self.subdomain_prefixes = config["subdomain_prefixes"]
-        self.current_profile = config.get("protection_profile", "default")
+        self.subdomain_prefixes = (
+            self.central_state["subdomain_prefixes"]
+            if self.central_state
+            else config["subdomain_prefixes"]
+        )
+        self.current_profile = "child_protection" if self.central_state else config.get("protection_profile", "default")
         self.profile_password = str(config.get("profile_password", "") or "")
         self.window = None
 
     def attach_window(self, window):
         self.window = window
 
+    def _require_unmanaged(self, action):
+        if self.central_state or CENTRAL_MANAGED_MARKER_FILE.is_file():
+            self.central_state = load_central_management_state() or self.central_state
+            raise PermissionError(f"{action} is controlled by Avantis Central on this PC.")
+
     def _save_rules(self, action="Policy settings updated"):
+        self._require_unmanaged("Local policy changes")
         previous_policy = policy_snapshot(load_config())
         current_policy = {
             "blocked_domains": self.blocklist,
@@ -2086,6 +2143,7 @@ class DesktopApi:
         record_admin_audit(action, f"{len(self.blocklist)} blocked domains; {sum(len(words) for words in self.categories.values())} detection rules.")
 
     def _authorize(self, password, action):
+        self._require_unmanaged(action)
         if self.current_profile == "child_protection" and self.profile_password and not verify_profile_password(password, self.profile_password):
             raise PermissionError(f"The admin password is required to {action} in Safe Mode.")
 
@@ -2202,12 +2260,28 @@ class DesktopApi:
 
     def get_state(self):
         print("Avantis get_state request received.", flush=True)
+        self.central_state = load_central_management_state()
+        if self.central_state:
+            self.blocklist = self.central_state["blocked_domains"]
+            self.subdomain_prefixes = self.central_state["subdomain_prefixes"]
+            self.current_profile = "child_protection"
+        client_central_status = (
+            {
+                key: value
+                for key, value in self.central_state.items()
+                if key not in {"blocked_domains", "subdomain_prefixes"}
+            }
+            if self.central_state
+            else None
+        )
         state = {
-            "blocked_domains": self.blocklist,
+            "blocked_domains": [] if self.central_state else self.blocklist,
             "categories": self.categories,
-            "subdomain_prefixes": self.subdomain_prefixes,
+            "subdomain_prefixes": [] if self.central_state else self.subdomain_prefixes,
             "protection_profile": self.current_profile,
             "has_profile_password": bool(self.profile_password),
+            "company_managed": bool(self.central_state),
+            "central_status": client_central_status,
             "hosts_status": inspect_hosts_rules(),
             "activity": load_activity(),
             "policy_history": self.get_policy_history(),
@@ -2263,6 +2337,7 @@ class DesktopApi:
         return {"added": domains, "source": path.name, "state": self.get_state()}
 
     def change_profile(self, profile, password="", new_password=""):
+        self._require_unmanaged("Changing the protection profile")
         if profile not in {"default", "child_protection"}:
             raise ValueError("Unknown protection profile.")
         if profile == self.current_profile:
@@ -2278,6 +2353,7 @@ class DesktopApi:
         return self.get_state()
 
     def admin_access(self, password=""):
+        self._require_unmanaged("Opening local administrator controls")
         if self.current_profile == "child_protection" and self.profile_password and not verify_profile_password(password, self.profile_password):
             raise PermissionError("The admin password is incorrect.")
         return {
@@ -2287,6 +2363,7 @@ class DesktopApi:
         }
 
     def set_profile_password(self, current_password, new_password):
+        self._require_unmanaged("Changing the local administrator password")
         if self.profile_password and not verify_profile_password(current_password, self.profile_password):
             raise PermissionError("The current admin password is incorrect.")
         self.profile_password = hash_profile_password(new_password.strip())
@@ -2294,6 +2371,7 @@ class DesktopApi:
         return self.get_state()
 
     def restore_admin(self, password=""):
+        self._require_unmanaged("Restoring local administrator mode")
         if self.profile_password and not verify_profile_password(password, self.profile_password):
             raise PermissionError("The admin password is incorrect.")
         self.current_profile = "default"
@@ -2349,6 +2427,7 @@ class DesktopApi:
         return entries
 
     def update_retention(self, retention_hours):
+        self._require_unmanaged("Changing local data retention")
         retention_hours = int(retention_hours)
         if retention_hours not in RETENTION_OPTIONS.values():
             raise ValueError("Choose a supported activity retention period.")
@@ -2364,6 +2443,7 @@ class DesktopApi:
         return load_activity()
 
     def apply_hosts(self):
+        self._require_unmanaged("Applying local website protection")
         if os.name == "nt" and not is_admin():
             return run_as_admin("apply")
         if len(self.blocklist) > HOSTS_DOMAIN_LIMIT:
@@ -2375,7 +2455,8 @@ class DesktopApi:
 
     def remove_hosts(self):
         if os.name == "nt" and not is_admin():
-            return run_as_admin("remove")
+            return             self._require_unmanaged("Removing local website protection")
+            run_as_admin("remove")
         removed = remove_hosts_rules()
         flushed, error = flush_dns_cache()
         record_admin_audit("Website protection removed", "Avantis website restrictions were removed." if removed else "No Avantis website restrictions were active.")

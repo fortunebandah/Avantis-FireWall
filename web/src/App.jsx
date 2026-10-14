@@ -44,6 +44,8 @@ function App() {
   const modalResolver = useRef(null)
   const [toast, setToast] = useState(null)
   const [busy, setBusy] = useState(false)
+  const safeMode = state?.protection_profile === 'child_protection'
+  const companyManaged = Boolean(state?.company_managed)
 
   useEffect(() => {
     const ready = () => {
@@ -71,12 +73,17 @@ function App() {
   }, [apiReady])
 
   useEffect(() => {
+    if (!apiReady || !companyManaged) return
+    const interval = window.setInterval(() => refreshState().catch(showError), 15000)
+    return () => window.clearInterval(interval)
+  }, [apiReady, companyManaged])
+
+  useEffect(() => {
     if (!toast) return
     const timeout = window.setTimeout(() => setToast(null), 6000)
     return () => window.clearTimeout(timeout)
   }, [toast])
 
-  const safeMode = state?.protection_profile === 'child_protection'
   const protectionStatusMessage = state?.hosts_status?.[0] || ''
   const protectionStatusLevel = state?.hosts_status?.[1] || 'warning'
   const protectionActive = /\d+ Avantis hostnames in \d+ mappings\./.test(protectionStatusMessage)
@@ -87,7 +94,23 @@ function App() {
       : protectionStatusMessage.includes('Incomplete Avantis markers')
         ? 'Review protection'
         : 'Protection not applied'
-  const hiddenPages = safeMode ? pages.filter((item) => item.id === 'protect') : pages
+  const centralLastCheckIn = state?.central_status?.last_check_in
+    ? Date.parse(state.central_status.last_check_in)
+    : NaN
+  const centralCheckInRecent = Number.isFinite(centralLastCheckIn) && Date.now() - centralLastCheckIn < 180000
+  const centralAgentStatus = state?.central_status?.last_error
+    ? 'Needs attention'
+    : centralCheckInRecent
+      ? 'Connected'
+      : state?.central_status?.last_check_in
+        ? 'No recent check-in'
+        : 'Waiting for first check-in'
+  const centralPolicySync = Number(state?.central_status?.policy_version) >= Number(state?.central_status?.server_policy_version)
+    ? 'Up to date'
+    : 'Update pending'
+  const hiddenPages = safeMode || companyManaged
+      ? pages.filter((item) => item.id === 'protect')
+      : pages
   const shownDomains = (state?.blocked_domains || []).filter((domain) => domain.includes(domainQuery.trim().toLowerCase()))
 
   async function refreshState() {
@@ -406,7 +429,7 @@ function App() {
         </nav>
         <div className="sidebar-bottom">
           <div className={`mode-chip ${safeMode ? 'safe' : ''}`}>
-            <div><strong>{safeMode ? 'Safe Mode' : 'Admin mode'}</strong></div>
+            <div><strong>{companyManaged ? 'Company Safe Mode' : safeMode ? 'Safe Mode' : 'Admin mode'}</strong></div>
           </div>
         </div>
       </aside>
@@ -416,7 +439,9 @@ function App() {
           <div className="breadcrumbs"><strong>{pages.find((item) => item.id === page)?.label}</strong></div>
           <div className="top-actions">
             <span className={`connection ${protectionActive ? 'active' : protectionStatusLevel === 'error' ? 'error' : 'idle'}`}>{protectionStatusLabel}</span>
-            {safeMode ? (
+            {companyManaged ? (
+              <span className="connection">Managed by Avantis Central</span>
+            ) : safeMode ? (
               <button className="button button-quiet" onClick={openAdminAccess}><KeyRound size={15} /> Admin access</button>
             ) : (
               <button className="button button-quiet" onClick={setPassword}><LockKeyhole size={15} /> Safe Mode password</button>
@@ -429,19 +454,30 @@ function App() {
             <>
               <div className="page-heading">
                 <div><h1>Protection</h1><p>A rule-based website blocker. Check a site or manage this PC’s website protection.</p></div>
-                <div className={`profile-select ${safeMode ? 'safe' : ''}`}>
+                {!companyManaged && <div className={`profile-select ${safeMode ? 'safe' : ''}`}>
                   <div><strong>{safeMode ? 'Safe Mode' : 'Admin'}</strong></div>
                   <select aria-label="Protection profile" value={state.protection_profile} onChange={(event) => changeProfile(event.target.value)}>
                     <option value="default">Admin</option><option value="child_protection">Safe Mode</option>
                   </select>
-                </div>
+                </div>}
               </div>
 
               <section className="stats-row" aria-label="Protection statistics">
-                <Stat label="Blocked domains" value={state.blocked_domains.length} />
-                <Stat label="Detection rules" value={Object.values(state.categories).reduce((sum, words) => sum + words.length, 0)} />
+                <Stat label={companyManaged ? 'Central policy' : 'Blocked domains'} value={companyManaged ? 'Managed' : state.blocked_domains.length} />
                 <Stat label="Manual checks" value={state.activity.events.length} />
               </section>
+
+              {companyManaged && <section className="surface central-status">
+                <div className="section-heading"><div><h2>Company-managed protection</h2></div><StatusPill status={state.hosts_status} /></div>
+                <p className="section-copy">This PC receives its website-blocking policy from your Avantis Central administrator. Changes are applied automatically when this PC checks in.</p>
+                <div className="central-status-details">
+                  <span><strong>Device:</strong> {state.central_status?.device_name || 'This PC'}</span>
+                  <span><strong>Central agent:</strong> {centralAgentStatus}</span>
+                  <span><strong>Policy sync:</strong> {centralPolicySync}</span>
+                  <span><strong>Last successful check-in:</strong> {state.central_status?.last_check_in ? new Date(state.central_status.last_check_in).toLocaleString() : 'Not yet connected'}</span>
+                </div>
+                {state.central_status?.last_error && <div className="signal-note"><AlertTriangle size={16} /><span>The Central agent could not complete its latest sync. Contact your administrator. The currently installed rules remain in place.</span></div>}
+              </section>}
 
               <div className="protect-grid">
                 <section className="surface analysis-panel">
@@ -480,7 +516,9 @@ function App() {
                   </div>
                 </div>
               </section>}
-              {safeMode && <section className="safe-banner"><div><strong>Safe Mode is active</strong><span>An admin must unlock this profile to edit settings or change this PC’s website protection.</span></div><button onClick={openAdminAccess}>Admin access</button></section>}
+              {companyManaged
+                ? <section className="safe-banner"><div><strong>Company Safe Mode is active</strong><span>Local policy and protection controls are managed by your Avantis Central administrator.</span></div></section>
+                : safeMode && <section className="safe-banner"><div><strong>Safe Mode is active</strong><span>An admin must unlock this profile to edit settings or change this PC’s website protection.</span></div><button onClick={openAdminAccess}>Admin access</button></section>}
             </>
           )}
 
@@ -495,15 +533,15 @@ function App() {
             </section>
           </>}
 
-          {page === 'domains' && <>
-            <PageTitle eyebrow="LOCAL RULE LIST" title="Blocked domains" description="Manage domains saved on this device. Applying changes to Windows is a separate action." />
+          {page === 'domains' && !companyManaged && <>
+            <PageTitle eyebrow={companyManaged ? 'COMPANY POLICY' : 'LOCAL RULE LIST'} title="Blocked domains" description={companyManaged ? 'View every domain in the policy currently applied by the Central agent on this PC.' : 'Manage domains saved on this device. Applying changes to Windows is a separate action.'} />
             <section className="surface domain-surface">
-              <div className="list-toolbar"><div className="domain-count"><strong>{state.blocked_domains.length}</strong><span>domains</span></div><div className="list-actions"><div className="search-control"><Search size={16} /><input value={domainQuery} onChange={(event) => setDomainQuery(event.target.value)} placeholder="Filter domains" aria-label="Filter blocked domains" /></div><button className="button button-outline" onClick={removeSelected} disabled={busy || !selectedDomains.length}><Trash2 size={15} /> Remove selected{selectedDomains.length ? ` (${selectedDomains.length})` : ''}</button><button className="icon-button danger" onClick={clearDomains} title="Clear all blocked domains" aria-label="Clear all blocked domains" disabled={busy || !state.blocked_domains.length}><Trash2 size={16} /></button></div></div>
-              <div className="domain-table-wrap"><table className="domain-table"><thead><tr><th><input type="checkbox" aria-label="Select all filtered domains" checked={shownDomains.length > 0 && shownDomains.every((domain) => selectedDomains.includes(domain))} onChange={(event) => setSelectedDomains(event.target.checked ? [...new Set([...selectedDomains, ...shownDomains])] : selectedDomains.filter((domain) => !shownDomains.includes(domain)))} /></th><th>DOMAIN</th><th>RULE</th><th>STATUS</th></tr></thead><tbody>
-                {shownDomains.map((domain) => <tr key={domain}><td><input type="checkbox" aria-label={`Select ${domain}`} checked={selectedDomains.includes(domain)} onChange={(event) => setSelectedDomains((current) => event.target.checked ? [...current, domain] : current.filter((item) => item !== domain))} /></td><td className="domain-name"><Globe2 size={15} />{domain}</td><td><span className="rule-label">Domain + subdomains</span></td><td><span className="table-status"><i /> Saved locally</span></td></tr>)}
-                {!shownDomains.length && <tr><td colSpan="4" className="empty-row">{domainQuery ? 'No domains match your filter.' : 'Your block list is empty.'}</td></tr>}
+              <div className="list-toolbar"><div className="domain-count"><strong>{state.blocked_domains.length}</strong><span>domains</span></div><div className="list-actions"><div className="search-control"><Search size={16} /><input value={domainQuery} onChange={(event) => setDomainQuery(event.target.value)} placeholder="Filter domains" aria-label="Filter blocked domains" /></div>{!companyManaged && <><button className="button button-outline" onClick={removeSelected} disabled={busy || !selectedDomains.length}><Trash2 size={15} /> Remove selected{selectedDomains.length ? ` (${selectedDomains.length})` : ''}</button><button className="icon-button danger" onClick={clearDomains} title="Clear all blocked domains" aria-label="Clear all blocked domains" disabled={busy || !state.blocked_domains.length}><Trash2 size={16} /></button></>}</div></div>
+              <div className="domain-table-wrap"><table className="domain-table"><thead><tr>{!companyManaged && <th><input type="checkbox" aria-label="Select all filtered domains" checked={shownDomains.length > 0 && shownDomains.every((domain) => selectedDomains.includes(domain))} onChange={(event) => setSelectedDomains(event.target.checked ? [...new Set([...selectedDomains, ...shownDomains])] : selectedDomains.filter((domain) => !shownDomains.includes(domain)))} /></th>}<th>DOMAIN</th><th>RULE</th><th>STATUS</th></tr></thead><tbody>
+                {shownDomains.map((domain) => <tr key={domain}>{!companyManaged && <td><input type="checkbox" aria-label={`Select ${domain}`} checked={selectedDomains.includes(domain)} onChange={(event) => setSelectedDomains((current) => event.target.checked ? [...current, domain] : current.filter((item) => item !== domain))} /></td>}<td className="domain-name"><Globe2 size={15} />{domain}</td><td><span className="rule-label">Domain + subdomains</span></td><td><span className="table-status"><i />{companyManaged ? 'Applied by Central' : 'Saved locally'}</span></td></tr>)}
+                {!shownDomains.length && <tr><td colSpan={companyManaged ? 3 : 4} className="empty-row">{domainQuery ? 'No domains match your filter.' : 'No blocked domains are in the applied policy.'}</td></tr>}
               </tbody></table></div>
-              <div className="table-foot"><span>Showing {shownDomains.length} of {state.blocked_domains.length}</span><span>Website restrictions update when you apply protection.</span></div>
+              <div className="table-foot"><span>Showing {shownDomains.length} of {state.blocked_domains.length}</span><span>{companyManaged ? 'To change this list, ask your Central administrator to update the published policy.' : 'Website restrictions update when you apply protection.'}</span></div>
             </section>
           </>}
 

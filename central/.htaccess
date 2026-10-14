@@ -1,0 +1,9 @@
+Options -Indexes
+<FilesMatch "^(config\.local\.php|config\.example\.php|schema\.sql|README\.md)$">
+    Require all denied
+</FilesMatch>
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^api/v1/?$ api/v1/index.php [END,E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+    RewriteRule ^api/v1/.*$ api/v1/index.php [END,E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+</IfModule>

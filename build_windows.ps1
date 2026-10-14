@@ -31,8 +31,13 @@ finally {
 & $pythonPath -m PyInstaller --clean --noconfirm (Join-Path $projectRoot "avantis_firewall.spec")
 if ($LASTEXITCODE -ne 0) { throw "Could not package Avantis FireWall." }
 
+& $pythonPath -m PyInstaller --clean --noconfirm (Join-Path $projectRoot "central_agent.spec")
+if ($LASTEXITCODE -ne 0) { throw "Could not package the Avantis Central service." }
+
 $applicationBundle = Join-Path $projectRoot "dist\Avantis FireWall"
+$serviceBundle = Join-Path $projectRoot "dist\Avantis Agent Service"
 Write-Host "Application bundle created at: $applicationBundle"
+Write-Host "Central service bundle created at: $serviceBundle"
 
 if ($SkipInstaller) {
     Write-Host "Installer compilation skipped by request."

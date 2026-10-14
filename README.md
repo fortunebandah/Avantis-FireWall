@@ -31,17 +31,17 @@ cd ..
 .\.venv\Scripts\python.exe app.py
 ```
 
-To package a Windows installer, install Inno Setup 6 or newer and run:
+To package the desktop app and its Windows Central service, install Inno Setup 6 or newer and run:
 
 ```powershell
 .\build_windows.ps1
 ```
 
-The installer is created at `dist\installer\AvantisFireWall-Setup-1.0.0.exe`. Use `.\build_windows.ps1 -SkipInstaller` to build just the application bundle.
+The installer is created at `dist\installer\AvantisFireWall-Setup-1.1.3.exe`. On a fresh installation, enter a one-time enrollment code from FireWall Central Administration. Setup installs the service machine-wide with administrator approval; the desktop app then runs as the signed-in user. The service checks in independently of the desktop window, retries transient policy and network errors, and is configured to restart automatically after an unexpected exit. Reinstalling on a previously enrolled PC keeps its device credential so the existing device record is reused. Use `.\build_windows.ps1 -SkipInstaller` to build the application and service bundles without compiling the installer.
 
 ## Your information
 
-Avantis does not require an account. Website checks run locally, and browsing activity is not monitored. Manual checks and administrative actions are stored locally. If you choose to download a public blocklist, your PC connects to that list's provider.
+Avantis does not require an account for local use. Website checks run locally, and browsing activity is not monitored. Manual checks and administrative actions are stored locally. If you enroll in FireWall Central Administration, the background service sends the PC name, app version, protection status, and policy version to the configured portal; it does not send browsing activity or manual site checks. If you choose to download a public blocklist, your PC connects to that list's provider.
 
 ## Customize rules
 
@@ -56,6 +56,10 @@ When running from source, edit `rules.json` while the app is closed. Add website
 }
 ```
 
-In the app, manage domains under **Blocked domains** and detection terms under **Insights & rules**. Saved changes take effect on this PC when you select **Apply protection**.
+In the app, manage domains under **Blocked domains** and detection terms under **Insights & rules**. Saved local changes take effect on this PC when you select **Apply protection**. On company-managed PCs, the blocked-domain list is visible to Central administrators in the portal; the client app shows connection and policy status without displaying the list.
 
 Existing plain-text Safe Mode passwords are automatically converted to a salted password hash when the app loads the settings. The hash cannot be used to recover the original password.
+
+## FireWall Central Administration on cPanel
+
+The cPanel portal and Windows service target `https://avantispcfeedback.avantis.co.zw/firewall/`. The portal publishes company-wide blocked-domain policies; enrolled Windows services check in periodically and apply them to their PC. Follow [`central/README.md`](./central/README.md) for server deployment, client enrollment, and limitations. A listed domain is blocked on enrolled PCs even if it is a legitimate website. Protect the portal administrator account and hosting environment; centrally delivered policies are validated but not cryptographically signed.
